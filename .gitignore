@@ -1,0 +1,6 @@
+*.o
+*.exe
+
+.vscode/
+docs/
+README.md
