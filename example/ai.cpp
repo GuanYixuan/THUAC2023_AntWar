@@ -11,6 +11,25 @@ constexpr bool LOG_SWITCH = false;
 constexpr bool LOG_STDOUT = false;
 constexpr int LOG_LEVEL = 0;
 
+struct Pos {
+    int x;
+    int y;
+};
+constexpr int highland_count = 33;
+constexpr Pos highlands[2][highland_count] = {
+    {
+        {6, 1}, {7, 1}, {4, 2}, {6, 2}, {8, 2}, {4, 3}, {5, 3}, {6, 4}, 
+        {8, 4}, {7, 5}, {5, 6}, {5, 7}, {6, 7}, {8, 7}, {7, 8}, {4, 9}, 
+        {5, 9}, {6, 9}, {7, 10}, {5, 11}, {6, 11}, {8, 11}, {5, 12}, {7, 13}, 
+        {6, 14}, {8, 14}, {4, 15}, {5, 15}, {4, 16}, {6, 16}, {8, 16}, {6, 17}, {7, 17}
+    }, {
+        {11, 1}, {12, 1}, {9, 2}, {11, 2}, {13, 2}, {13, 3}, {14, 3}, {9, 4}, 
+        {11, 4}, {11, 5}, {12, 6}, {10, 7}, {12, 7}, {13, 7}, {10, 8}, {12, 9}, 
+        {13, 9}, {14, 9}, {10, 10}, {10, 11}, {12, 11}, {13, 11}, {12, 12}, {11, 13}, 
+        {9, 14}, {11, 14}, {13, 15}, {14, 15}, {9, 16}, {11, 16}, {13, 16}, {11, 17}, {12, 17}
+    }
+};
+
 // 计划任务类别
 enum class Task_type {
     tower
@@ -29,15 +48,21 @@ struct Scheduled_task {
     }
 };
 
-// 模拟阈值（仅对敌方生效）
-// 尚未生效
-struct Simulation_thresh {
+// 针对敌方的模拟结果
+struct Enemy_sim_result {
+    optional<Operation> op;
     int succ_ant;
     int old_ant;
+    int cost;
 
-    bool eq_worse_than(int succ, int old) const {
-        if (succ_ant != succ) return succ_ant > succ;
-        return old_ant >= old;
+    Enemy_sim_result(int _succ, int _old, int _cost, const optional<Operation>& _op = {})
+    : succ_ant(_succ), old_ant(_old), cost(_cost), op(_op) {}
+
+    // better than
+    // 【此处写死了3】
+    bool operator>(const Enemy_sim_result& other) {
+        if (succ_ant != other.succ_ant) return succ_ant < other.succ_ant;
+        return cost + old_ant * 3 < other.cost + other.old_ant * 3;
     }
 };
 /**
@@ -56,7 +81,7 @@ class Ant_simulator {
         void apply_op(int _player_id, const Operation& op) {
             imm_ops[_player_id].push_back(op);
         }
-        void simulate(int round) {
+        Enemy_sim_result simulate(int round, int _cost = 0, const optional<Operation>& _op = {}) {
             Simulator s(info);
             for (int i = 0; i < round; ++i) {
                 if (player_id == 0) {
@@ -83,13 +108,16 @@ class Ant_simulator {
                     s.apply_operations_of_player(0);
                 }
             }
-            for (int i = 0; i < 2; i++) succ_ants[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+
+            return Enemy_sim_result(base_damage[player_id], 0, _cost, _op);
         }
     
     GameInfo info;
     std::vector<Operation> imm_ops[2];
 
-    int succ_ants[2];
+    // 模拟结果：基地受到的伤害[player_id]
+    int base_damage[2];
 };
 
 class AI_ {
@@ -104,6 +132,12 @@ class AI_ {
             ops.clear();
             avail_money = game_info.coins[player_id];
 
+            // 初始策略
+            if (game_info.round == 0) {
+                ops.emplace_back(BuildTower, player_id ? 14 : 4, 9);
+                return ops;
+            }
+
             // 处理计划任务
             while (schedule_queue.size() && schedule_queue.top() <= game_info.round) {
                 Scheduled_task task = schedule_queue.top();
@@ -112,7 +146,47 @@ class AI_ {
                 assert(avail_money >= 0);
             }
 
+            // 塔操作搜索
+            if (game_info.round >= 16) {
+                Ant_simulator sim0(player_id, game_info);
+                Enemy_sim_result best_result = sim0.simulate(SIM_ROUND);
+                if (best_result.succ_ant > 0) { // 如果啥事不干基地会扣血
+                    // 搜索：建塔
+                    int build_cost = game_info.build_tower_cost(game_info.tower_num_of_player(player_id));
+                    if (build_cost < 120 && build_cost <= avail_money) { // 暂时写死不允许建4号塔
+                        for (int i = 0; i < highland_count; i++) {
+                            Operation temp_op(BuildTower, highlands[player_id][i].x, highlands[player_id][i].y);
+                            if (!game_info.is_operation_valid(player_id, temp_op)) continue;
 
+                            Ant_simulator sim(player_id, game_info);
+                            sim.apply_op(player_id, temp_op);
+                            Enemy_sim_result res = sim.simulate(SIM_ROUND, build_cost, temp_op);
+
+                            if (res > best_result) best_result = res;
+                        }
+                    }
+                    // 搜索：升级
+                    for (const Tower& t : game_info.towers) {
+                        if (t.player != player_id || game_info.upgrade_tower_cost(t.type) == LEVEL3_TOWER_UPGRADE_PRICE) continue;
+
+                        int tower_level = (game_info.upgrade_tower_cost(t.type) == -1) ? 1 : 2;
+                        int upgrade_cost = (tower_level == 1) ? 60 : 200;
+                        if (upgrade_cost > avail_money) continue;
+
+                        Operation temp_op(UpgradeTower, t.id, (tower_level == 1) ? TowerType::Quick : TowerType::Double);
+                        Ant_simulator sim(player_id, game_info);
+                        sim.apply_op(player_id, temp_op);
+                        Enemy_sim_result res = sim.simulate(SIM_ROUND, upgrade_cost);
+
+                        if (res > best_result) best_result = res;
+                    }
+                }
+
+                if (best_result.op.has_value()) {
+                    ops.push_back(best_result.op.value());
+                    avail_money += game_info.get_operation_income(player_id, ops.back());
+                }
+            }
 
             return ops;
         }
