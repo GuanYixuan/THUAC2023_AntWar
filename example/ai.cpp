@@ -11,6 +11,9 @@ constexpr bool LOG_SWITCH = false;
 constexpr bool LOG_STDOUT = false;
 constexpr int LOG_LEVEL = 0;
 
+int pid;
+const GameInfo* info;
+
 struct Pos {
     int x;
     int y;
@@ -50,26 +53,16 @@ struct Scheduled_task {
 
 // 针对敌方的模拟结果
 struct Enemy_sim_result {
-    std::vector<Operation> op_list;
     int succ_ant;
     int old_ant;
-    int cost;
     int first_succ;
+    int dmg_dealt;
 
-    Enemy_sim_result(int _succ, int _old, int _cost, int _first, const std::vector<Operation>& _op = {})
-    : succ_ant(_succ), old_ant(_old), cost(_cost), first_succ(_first), op_list(_op) {}
+    Enemy_sim_result() : succ_ant(99), old_ant(99), first_succ(0), dmg_dealt(0) {};
 
-    std::string str() const {
-        return str_wrap("[succ: %2d, first: %2d, cost: %d, op: %d]", succ_ant, first_succ, cost, op_list.size() ? op_list.front().type : -1);
-    }
+    Enemy_sim_result(int _succ, int _old, int _first, int _dmg)
+    : succ_ant(_succ), old_ant(_old), first_succ(_first), dmg_dealt(_dmg) {}
 
-    // better than
-    // 【此处写死了3】
-    bool operator>(const Enemy_sim_result& other) const {
-        if (succ_ant * other.succ_ant == 0 && succ_ant != other.succ_ant) return succ_ant == 0;
-        if (first_succ != other.first_succ) return first_succ > other.first_succ;
-        return cost + old_ant * 3 < other.cost + other.old_ant * 3;
-    }
 };
 /**
  * @brief 用于模拟ant行动的模拟器，模拟期间不会考虑两个玩家的任何操作
@@ -78,58 +71,86 @@ struct Enemy_sim_result {
 class Ant_simulator {
     static constexpr int INIT_HEALTH = 49;
 
-    const int player_id;
-
     public:
-        Ant_simulator(int _player_id, const GameInfo& _info) : player_id(_player_id), info(_info) {
-            for (int i = 0; i < 2; i++) info.bases[i].hp = INIT_HEALTH;
-        }
-        void apply_op(int _player_id, const Operation& op) {
-            imm_ops[_player_id].push_back(op);
-        }
-        Enemy_sim_result simulate(int round, int _cost = 0) {
-            Simulator s(info);
-            int _r = 0;
-            for (; _r < round; ++_r) {
-                if (player_id == 0) {
-                    // Add player0's operation
-                    if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
-                    // Apply player0's operation
-                    s.apply_operations_of_player(0);
-                    // Add player1's operation
-                    if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
-                    // Apply player1's operation
-                    s.apply_operations_of_player(1);
-                    // Next round
-                    if (s.next_round() != GameState::Running) break;
-                } else {
-                    // Add player1's operation
-                    if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
-                    // Apply player1's operation
-                    s.apply_operations_of_player(1);
-                    // Next round
-                    if (s.next_round() != GameState::Running) break;
-                    // Add player0's operation
-                    if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
-                    // Apply player0's operation
-                    s.apply_operations_of_player(0);
-                }
-                if (first_succ > 512 && INIT_HEALTH != s.get_info().bases[player_id].hp) first_succ = _r;
+    Ant_simulator() : sim_info(*info) {
+        for (int i = 0; i < 2; i++) sim_info.bases[i].hp = INIT_HEALTH;
+    }
+    void apply_op(int _player_id, const Operation& op) {
+        imm_ops[_player_id].push_back(op);
+    }
+    Enemy_sim_result simulate(int round) {
+        int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
+        int first_succ = 513; // 第一个突破防线的蚂蚁将出现在何时？
+        Simulator s(sim_info);
+
+        int _r = 0;
+        for (; _r < round; ++_r) {
+            if (pid == 0) {
+                // Add player0's operation
+                if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
+                // Add player1's operation
+                if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                if (s.next_round() != GameState::Running) break;
+            } else {
+                // Add player1's operation
+                if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                if (s.next_round() != GameState::Running) break;
+                // Add player0's operation
+                if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
             }
-            // assert(s.get_info().round >= 512 || _r == round);
-            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
-
-            return Enemy_sim_result(base_damage[player_id], 0, _cost, first_succ, imm_ops[player_id]);
+            if (first_succ > 512 && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
         }
+        // assert(s.get_info().round >= 512 || _r == round);
+        for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+
+        return Enemy_sim_result(base_damage[pid], 0, first_succ, base_damage[!pid]);
+    }
     
-    GameInfo info;
+    GameInfo sim_info;
     std::vector<Operation> imm_ops[2];
+};
 
-    // 模拟结果：基地受到的伤害[player_id]
-    int base_damage[2];
+class Operation_list {
+    public:
+    std::vector<Operation> ops;
+    int cost;
 
-    // 第一个突破防线的蚂蚁将出现在何时？
-    int first_succ = 513;
+    Enemy_sim_result res;
+
+    Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : ops(_ops), cost(_cost) {
+        if (eval_round >= 0) evaluate(eval_round);
+    };
+
+    const Enemy_sim_result& evaluate(int _round) {
+        Ant_simulator sim;
+        for (const Operation& op : ops) sim.apply_op(pid, op);
+        res = sim.simulate(_round);
+        return res;
+    }
+
+    std::string str() const {
+        std::string ret("(");
+        for (const Operation& op : ops) ret += str_wrap(" %2d", op.type);
+        ret += ")";
+        return ret + str_wrap(" [s: %2d, f: %3d]", res.succ_ant, res.first_succ);
+    }
+
+    // better than
+    bool operator>(const Operation_list& other) const {
+        if (res.succ_ant * other.res.succ_ant == 0 && res.succ_ant != other.res.succ_ant) return res.succ_ant == 0;
+        return res.first_succ > other.res.first_succ;
+        return res.old_ant < other.res.old_ant;
+    }
 };
 
 class AI_ {
@@ -141,6 +162,9 @@ class AI_ {
         }
         std::vector<Operation> ai_main(int player_id, const GameInfo &game_info) {
             // 初始化
+            pid = player_id;
+            info = &game_info;
+
             ops.clear();
             logger.config(game_info.round);
             avail_money = game_info.coins[player_id];
@@ -161,11 +185,10 @@ class AI_ {
 
             // 塔操作搜索
             if (game_info.round >= 16) {
-                Ant_simulator sim0(player_id, game_info);
-                Enemy_sim_result best_result = sim0.simulate(get_sim_round(game_info.round));
+                Operation_list best_result({}, get_sim_round(game_info.round), 0);
                 logger.err("raw: " + best_result.str());
 
-                if (best_result.succ_ant > 0 && best_result.first_succ < 20) { // 如果啥事不干基地会扣血
+                if (best_result.res.succ_ant > 0 && best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
                     // 搜索：建塔
                     int build_cost = game_info.build_tower_cost(game_info.tower_num_of_player(player_id));
                     if (build_cost < 120 && build_cost <= avail_money) { // 暂时写死不允许建4号塔
@@ -173,57 +196,51 @@ class AI_ {
                             Operation temp_op(BuildTower, highlands[player_id][i].x, highlands[player_id][i].y);
                             if (!game_info.is_operation_valid(player_id, temp_op)) continue;
 
-                            Ant_simulator sim(player_id, game_info);
-                            sim.apply_op(player_id, temp_op);
-                            Enemy_sim_result res = sim.simulate(get_sim_round(game_info.round), build_cost);
-
-                            if (res > best_result) best_result = res;
+                            Operation_list opl({temp_op}, get_sim_round(game_info.round), build_cost);
+                            if (opl > best_result) best_result = opl;
                         }
                     }
                     // 搜索：升级
                     for (const Tower& t : game_info.towers) {
-                        if (t.player != player_id || game_info.upgrade_tower_cost(t.type) == LEVEL3_TOWER_UPGRADE_PRICE) continue;
+                        if (t.player != player_id || game_info.upgrade_tower_cost(t.type) == LEVEL3_TOWER_UPGRADE_PRICE || game_info.is_shielded_by_emp(t)) continue;
 
                         int tower_level = (game_info.upgrade_tower_cost(t.type) == -1) ? 1 : 2;
                         int upgrade_cost = (tower_level == 1) ? LEVEL2_TOWER_UPGRADE_PRICE : LEVEL3_TOWER_UPGRADE_PRICE;
                         if (upgrade_cost > avail_money) continue;
 
                         Operation temp_op(UpgradeTower, t.id, (tower_level == 1) ? TowerType::Quick : TowerType::Double);
-                        assert(game_info.is_operation_valid(player_id, temp_op));
+                        logger.warn_if(!game_info.is_operation_valid(player_id, temp_op), "invalid upgrade attempt");
+                        if (!game_info.is_operation_valid(player_id, temp_op)) continue;
 
-                        Ant_simulator sim(player_id, game_info);
-                        sim.apply_op(player_id, temp_op);
-                        Enemy_sim_result res = sim.simulate(get_sim_round(game_info.round), upgrade_cost * UPGRADE_COST_MULT); // 为升级提供优惠
+                        Operation_list opl({temp_op}, get_sim_round(game_info.round), upgrade_cost * UPGRADE_COST_MULT); // 为升级提供优惠
+                        logger.err("upd: " + opl.str());
 
-                        logger.err("upd: " + res.str());
-
-                        if (res > best_result) best_result = res;
+                        if (opl > best_result) best_result = opl;
                     }
                     // 搜索：搬迁
                     build_cost = game_info.build_tower_cost(game_info.tower_num_of_player(player_id) - 1) / 5; // 真实消耗：0.2倍塔造价
                     if (build_cost <= avail_money) {
                         for (const Tower& t : game_info.towers) {
-                            if (t.player != player_id || game_info.upgrade_tower_cost(t.type) != -1) continue; // 被拆塔必然是1级的
+                            if (t.player != player_id || game_info.upgrade_tower_cost(t.type) != -1 || game_info.is_shielded_by_emp(t)) continue; // 被拆塔必然是1级的
                             Operation destroy_op(DowngradeTower, t.id);
+                            logger.warn_if(!game_info.is_operation_valid(player_id, destroy_op), "invalid destruct attempt");
+                            if (!game_info.is_operation_valid(player_id, destroy_op)) continue;
 
                             for (int i = 0; i < highland_count; i++) {
                                 Operation build_op(BuildTower, highlands[player_id][i].x, highlands[player_id][i].y);
                                 if (!game_info.is_operation_valid(player_id, build_op)) continue;
 
-                                Ant_simulator sim(player_id, game_info);
-                                sim.apply_op(player_id, destroy_op);
-                                sim.apply_op(player_id, build_op);
-                                Enemy_sim_result res = sim.simulate(get_sim_round(game_info.round), build_cost);
+                                Operation_list opl({destroy_op, build_op}, get_sim_round(game_info.round), build_cost);
 
-                                if (res > best_result) best_result = res;
+                                if (opl > best_result) best_result = opl;
                             }
                         }
                     }
                 }
 
-                if (best_result.op_list.size()) {
+                if (best_result.ops.size()) {
                     logger.err("best: " + best_result.str());
-                    for (const Operation& op : best_result.op_list) ops.push_back(op);
+                    for (const Operation& op : best_result.ops) ops.push_back(op);
                     avail_money += game_info.get_operation_income(player_id, ops.back());
                 }
             }
@@ -245,8 +262,8 @@ class AI_ {
 
         // 模拟的回合数
         static int get_sim_round(int curr_round) {
-            if (curr_round < 150) return 40 + curr_round / 3;
-            return 90;
+            if (curr_round < 90) return 40 + curr_round / 3;
+            return 70;
         }
 
         static constexpr double UPGRADE_COST_MULT = 0.85;
