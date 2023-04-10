@@ -27,7 +27,7 @@ class Logger {
 		void log(int level, const char* format, ...);
 		void err(const char* format, ...);
 		void err(const std::string& str);
-		void warn_if(bool cond, const std::string& str);
+		bool warn_if(bool cond, const std::string& str);
 		void raw(const char* format, ...);
 		void flush(); // 每回合结束要flush
 	private:
@@ -77,9 +77,10 @@ void Logger::err(const std::string& str) {
 	if(!release) return;
 	fprintf(stderr, "%03d %s\n", turn, str.c_str());
 }
-void Logger::warn_if(bool cond, const std::string& str) {
-	if(!release || !cond) return;
+bool Logger::warn_if(bool cond, const std::string& str) {
+	if(!release || !cond) return cond;
 	fprintf(stderr, "%03d [w] %s\n", turn, str.c_str());
+	return cond;
 }
 void Logger::raw(const char* format, ...) {
 	if(!log_switch) return;

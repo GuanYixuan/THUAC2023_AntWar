@@ -214,6 +214,10 @@ class AI_ {
         }
 
         void ai_main(const GameInfo &game_info) {
+            // 公共变量
+            int sim_round = get_sim_round(game_info.round);
+            int tower_num = game_info.tower_num_of_player(pid);
+
             // 初始策略
             if (game_info.round == 0) {
                 ops.push_back(Util::build_op(FIRST_TOWER_POS[pid]));
@@ -228,58 +232,85 @@ class AI_ {
                 assert(avail_money >= 0);
             }
 
+            // debug
+            std::string cur = "curr: ";
+            for (const Ant& a : game_info.ants) cur += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
+            std::string tow = "tow: ";
+            for (const Tower& t : game_info.towers) tow += str_wrap("(id:%3d, cd:%2d) ", t.id, t.cd);
+            logger.err(pred);
+            logger.err(cur);
+            logger.err(tow);
+
             // 塔操作搜索
             if (game_info.round >= 16) {
-                Operation_list raw_result({}, get_sim_round(game_info.round), 0);
+                Operation_list raw_result({}, sim_round, 0);
+                int raw_f_succ = raw_result.res.first_succ;
                 Operation_list best_result(raw_result);
                 logger.err("raw: " + best_result.str());
 
                 if (best_result.res.succ_ant > 0 && best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
                     // 搜索：建塔
-                    int build_cost = game_info.build_tower_cost(game_info.tower_num_of_player(pid));
-                    if (build_cost < 120 && build_cost <= avail_money) { // 暂时写死不允许建4号塔
+                    int build_cost = game_info.build_tower_cost(tower_num);
+                    if ((build_cost < 120 || raw_f_succ <= 5) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建4号塔
                         for (const Pos& pos : feasible_hl[pid]) {
                             const Operation& build_op = Util::build_op(pos);
-                            if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST) continue;
+                            if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && raw_f_succ > 5) continue;
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
-                            Operation_list opl({build_op}, get_sim_round(game_info.round), build_cost);
+                            Operation_list opl({build_op}, sim_round, build_cost);
                             if (opl > best_result) best_result = opl;
                         }
                         logger.err("bud: " + best_result.str());
                     }
-                    // 搜索：升级
-                    for (const Tower& t : game_info.towers) {
-                        if (t.player != pid || game_info.upgrade_tower_cost(t.type) == LEVEL3_TOWER_UPGRADE_PRICE || game_info.is_shielded_by_emp(t)) continue;
+                    // 搜索：（拆除）+升级
+                    for (auto it = game_info.towers.begin(); ; it++) {
+                        int downgrade_income = 0; // 降级收入
+                        optional<Operation> down_op = nullopt;
+                        if (it != game_info.towers.end()) { // 如果要降级
+                            const Tower& t_down = *it;
+                            if (t_down.player != pid || game_info.upgrade_tower_cost(t_down.type) != -1 || game_info.is_shielded_by_emp(t_down)) continue;
 
-                        int tower_level = (game_info.upgrade_tower_cost(t.type) == -1) ? 1 : 2;
-                        int upgrade_cost = (tower_level == 1) ? LEVEL2_TOWER_UPGRADE_PRICE : LEVEL3_TOWER_UPGRADE_PRICE;
-                        if (upgrade_cost > avail_money) continue;
+                            down_op = Operation(DowngradeTower, t_down.id);
+                            if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
 
-                        const Operation& upgrade_op = Util::upgrade_op(t, (tower_level == 1) ? TowerType::Quick : TowerType::Double);
-                        logger.warn_if(!game_info.is_operation_valid(pid, upgrade_op), "invalid upgrade attempt");
-                        if (!game_info.is_operation_valid(pid, upgrade_op)) continue;
+                            downgrade_income = game_info.destroy_tower_income(tower_num);
+                        } // 否则不降级
 
-                        Operation_list opl({upgrade_op}, get_sim_round(game_info.round), upgrade_cost * UPGRADE_COST_MULT); // 为升级提供优惠
-                        logger.err("upd: " + opl.str());
+                        for (const Tower& t_up : game_info.towers) {
+                            if (t_up.player != pid || (down_op.has_value() && down_op.value().arg0 == t_up.id)) continue;
+                            if (game_info.upgrade_tower_cost(t_up.type) == LEVEL3_TOWER_UPGRADE_PRICE || game_info.is_shielded_by_emp(t_up)) continue;
 
-                        if (opl > best_result) best_result = opl;
+                            int tower_level = (game_info.upgrade_tower_cost(t_up.type) == -1) ? 1 : 2;
+                            int total_cost = ((tower_level == 1) ? LEVEL2_TOWER_UPGRADE_PRICE : LEVEL3_TOWER_UPGRADE_PRICE) - downgrade_income;
+                            if (total_cost > avail_money) continue;
+
+                            const Operation& upgrade_op = Util::upgrade_op(t_up, (tower_level == 1) ? TowerType::Quick : TowerType::Double);
+                            if (logger.warn_if(!game_info.is_operation_valid(pid, upgrade_op), "invalid upgrade attempt")) continue;
+
+                            Operation_list opl({upgrade_op}, -1, total_cost * UPGRADE_COST_MULT); // 为升级提供优惠
+                            if (down_op.has_value()) opl.ops.push_back(down_op.value());
+                            opl.evaluate(sim_round);
+                            logger.err("upd: " + opl.str());
+
+                            if (opl > best_result) best_result = opl;
+                        }
+                        if (it == game_info.towers.end()) break;
                     }
+
                     // 搜索：搬迁
-                    build_cost = game_info.build_tower_cost(game_info.tower_num_of_player(pid) - 1) / 5; // 真实消耗：0.2倍塔造价
+                    build_cost = game_info.build_tower_cost(tower_num - 1) / 5; // 真实消耗：0.2倍塔造价
                     if (build_cost <= avail_money) {
                         for (const Tower& t : game_info.towers) {
                             if (t.player != pid || game_info.upgrade_tower_cost(t.type) != -1 || game_info.is_shielded_by_emp(t)) continue; // 被拆塔必然是1级的
                             Operation destroy_op(DowngradeTower, t.id);
-                            logger.warn_if(!game_info.is_operation_valid(pid, destroy_op), "invalid destruct attempt");
-                            if (!game_info.is_operation_valid(pid, destroy_op)) continue;
+                            if (logger.warn_if(!game_info.is_operation_valid(pid, destroy_op), "invalid destruct attempt")) continue;
 
                             for (const Pos& pos : feasible_hl[pid]) {
                                 const Operation& build_op = Util::build_op(pos);
-                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST) continue;
+                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && raw_f_succ > 5) continue;
                                 if (!game_info.is_operation_valid(pid, build_op)) continue;
 
-                                Operation_list opl({destroy_op, build_op}, get_sim_round(game_info.round), build_cost);
+                                Operation_list opl({destroy_op, build_op}, sim_round, build_cost);
                                 if (opl > best_result) best_result = opl;
                             }
                         }
@@ -289,8 +320,8 @@ class AI_ {
                     bool emp_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                         [&](const SuperWeapon& sup){return sup.player != pid && sup.type == EB;});
                     bool lightning_valid = (game_info.super_weapon_cd[pid][LS] <= 0) && (SUPER_WEAPON_INFO[LS][3] <= avail_money);
-                    if (raw_result.res.first_succ <= 3 && emp_active && lightning_valid) {
-                        Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, get_sim_round(game_info.round), SUPER_WEAPON_INFO[LS][3]);
+                    if (raw_f_succ <= 3 && emp_active && lightning_valid) {
+                        Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3]);
                         logger.err("LS: " + opl.str());
                         if (opl > best_result) best_result = opl;
                     }
@@ -303,6 +334,33 @@ class AI_ {
                     }
                 }
             }
+
+            // debug 专用
+            Simulator s(game_info);
+            s.verbose = 1;
+            if (pid == 0) {
+                // Add player0's operation
+                for (auto &op : ops) s.add_operation_of_player(0, op);
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
+                // Add player1's operation
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                s.next_round();
+            } else {
+                // Add player1's operation
+                for (auto &op : ops) s.add_operation_of_player(1, op);
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                s.next_round();
+                // Add player0's operation
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
+            }
+            pred = "pred: ";
+            for (const Ant& a : s.get_info().ants) pred += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
         }
 
         Logger logger;
@@ -316,6 +374,8 @@ class AI_ {
 
         // 计划任务队列，按时间升序排列
         std::priority_queue<Scheduled_task> schedule_queue;
+
+        std::string pred;
 
         // 模拟的回合数
         static int get_sim_round(int curr_round) {
