@@ -6,6 +6,8 @@
 #include <string>
 #include <cassert>
 
+constexpr bool DEBUG = true;
+
 constexpr bool RELEASE = true;
 constexpr bool LOG_SWITCH = false;
 constexpr bool LOG_STDOUT = false;
@@ -49,9 +51,12 @@ const std::vector<Pos> feasible_hl[2] = {
 
 class Util {
     public:
-    static int closest_tower_dis(const Pos& pos) {
+    static int closest_tower_dis(const Pos& pos, int exclude_id = -1) {
         int ans = 999;
-        for (const Tower& t : info->towers) if (t.player == pid) ans = std::min(ans, distance(t.x, t.y, pos.x, pos.y));
+        for (const Tower& t : info->towers) {
+            if (t.player != pid || t.id == exclude_id) continue;
+            ans = std::min(ans, distance(t.x, t.y, pos.x, pos.y));
+        }
         return ans;
     }
 
@@ -116,7 +121,7 @@ class Ant_simulator {
     }
     Enemy_sim_result simulate(int round) {
         int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
-        int first_succ = 513; // 第一个突破防线的蚂蚁将出现在何时？
+        int first_succ = MAX_ROUND + 1; // 第一个突破防线的蚂蚁将出现在何时？
         Simulator s(sim_info);
 
         int _r = 0;
@@ -144,7 +149,7 @@ class Ant_simulator {
                 // Apply player0's operation
                 s.apply_operations_of_player(0);
             }
-            if (first_succ > 512 && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
+            if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
         }
         // assert(s.get_info().round >= 512 || _r == round);
         for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
@@ -163,9 +168,15 @@ class Operation_list {
 
     Enemy_sim_result res;
 
-    Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : ops(_ops), cost(_cost) {
+    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : ops(_ops), cost(_cost) {
         if (eval_round >= 0) evaluate(eval_round);
     };
+    void append(const Operation& op) {
+        ops.push_back(op);
+    }
+    void append(const optional<Operation>& op) {
+        if (op) ops.push_back(op.value());
+    }
 
     const Enemy_sim_result& evaluate(int _round) {
         Ant_simulator sim;
@@ -182,16 +193,15 @@ class Operation_list {
     }
     // better than
     bool operator>(const Operation_list& other) const {
-        if (res.succ_ant * other.res.succ_ant == 0 && res.succ_ant != other.res.succ_ant) return res.succ_ant == 0;
-        return res.first_succ > other.res.first_succ;
-        return res.old_ant < other.res.old_ant;
+        if (res.first_succ != other.res.first_succ) return res.first_succ > other.res.first_succ;
+        return cost + res.old_ant * 3 + res.succ_ant * 15 < other.cost + other.res.old_ant * 3 + other.res.succ_ant * 15;
     }
 };
 
 class AI_ {
     public:
-        AI_()
-        : logger(RELEASE, LOG_SWITCH, LOG_STDOUT, LOG_LEVEL)
+        Logger logger;
+        AI_() : logger(RELEASE, LOG_SWITCH, LOG_STDOUT, LOG_LEVEL)
         {
 
         }
@@ -207,10 +217,61 @@ class AI_ {
             logger.err("coin: %3d vs %3d", game_info.coins[pid], game_info.coins[!pid]);
             avail_money = game_info.coins[player_id];
 
+            // 模拟检查
+            ai_simulation_checker_pre(game_info);
+
             // 主决策
             ai_main(game_info); // 暂时维持原本的传参模式
 
+            // 模拟检查
+            ai_simulation_checker_pos(game_info);
+
             return ops;
+        }
+
+    private:
+        std::string pred;
+        // 检查Simulator对一回合后的预测结果是否与实测符合
+        void ai_simulation_checker_pre(const GameInfo &game_info) {
+            std::string cur;
+            for (const Ant& a : game_info.ants) cur += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
+            if (cur != pred && game_info.round > 0) {
+                logger.err("[w] Predition and truth differ for round %d", game_info.round);
+                logger.err("Pred: " + pred);
+                logger.err("Truth:" + cur);
+
+                std::string tow = "tow: ";
+                for (const Tower& t : game_info.towers) tow += str_wrap("(id:%3d, cd:%2d) ", t.id, t.cd);
+                logger.err(tow);
+            }
+        }
+        // 检查Simulator对一回合后的预测结果是否与实测符合
+        void ai_simulation_checker_pos(const GameInfo &game_info) {
+            Simulator s(game_info);
+            // s.verbose = 1;
+            if (pid == 0) {
+                // Add player0's operation
+                for (auto &op : ops) s.add_operation_of_player(0, op);
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
+                // Add player1's operation
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                s.next_round();
+            } else {
+                // Add player1's operation
+                for (auto &op : ops) s.add_operation_of_player(1, op);
+                // Apply player1's operation
+                s.apply_operations_of_player(1);
+                // Next round
+                s.next_round();
+                // Add player0's operation
+                // Apply player0's operation
+                s.apply_operations_of_player(0);
+            }
+            pred = "";
+            for (const Ant& a : s.get_info().ants) pred += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
         }
 
         void ai_main(const GameInfo &game_info) {
@@ -227,19 +288,11 @@ class AI_ {
             // 处理计划任务
             while (schedule_queue.size() && schedule_queue.top() <= game_info.round) {
                 Scheduled_task task = schedule_queue.top();
+                schedule_queue.pop();
                 ops.push_back(task.op);
                 avail_money += game_info.get_operation_income(pid, task.op);
                 assert(avail_money >= 0);
             }
-
-            // debug
-            std::string cur = "curr: ";
-            for (const Ant& a : game_info.ants) cur += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
-            std::string tow = "tow: ";
-            for (const Tower& t : game_info.towers) tow += str_wrap("(id:%3d, cd:%2d) ", t.id, t.cd);
-            logger.err(pred);
-            logger.err(cur);
-            logger.err(tow);
 
             // 塔操作搜索
             if (game_info.round >= 16) {
@@ -248,19 +301,20 @@ class AI_ {
                 Operation_list best_result(raw_result);
                 logger.err("raw: " + best_result.str());
 
-                if (best_result.res.succ_ant > 0 && best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
+                if (best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
                     // 搜索：建塔
                     int build_cost = game_info.build_tower_cost(tower_num);
-                    if ((build_cost < 120 || raw_f_succ <= 5) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建4号塔
+                    if ((build_cost < 120 || raw_f_succ <= 5) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
                         for (const Pos& pos : feasible_hl[pid]) {
                             const Operation& build_op = Util::build_op(pos);
-                            if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && raw_f_succ > 5) continue;
+                            if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST) continue;
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
                             Operation_list opl({build_op}, sim_round, build_cost);
+                            logger.err("bud: " + opl.str());
+
                             if (opl > best_result) best_result = opl;
                         }
-                        logger.err("bud: " + best_result.str());
                     }
                     // 搜索：（拆除）+升级
                     for (auto it = game_info.towers.begin(); ; it++) {
@@ -288,7 +342,7 @@ class AI_ {
                             if (logger.warn_if(!game_info.is_operation_valid(pid, upgrade_op), "invalid upgrade attempt")) continue;
 
                             Operation_list opl({upgrade_op}, -1, total_cost * UPGRADE_COST_MULT); // 为升级提供优惠
-                            if (down_op.has_value()) opl.ops.push_back(down_op.value());
+                            opl.append(down_op);
                             opl.evaluate(sim_round);
                             logger.err("upd: " + opl.str());
 
@@ -307,10 +361,11 @@ class AI_ {
 
                             for (const Pos& pos : feasible_hl[pid]) {
                                 const Operation& build_op = Util::build_op(pos);
-                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && raw_f_succ > 5) continue;
+                                if (Util::closest_tower_dis(pos, t.id) < MIN_TOWER_DIST) continue;
                                 if (!game_info.is_operation_valid(pid, build_op)) continue;
 
                                 Operation_list opl({destroy_op, build_op}, sim_round, build_cost);
+                                logger.err("mov: " + opl.str());
                                 if (opl > best_result) best_result = opl;
                             }
                         }
@@ -320,7 +375,7 @@ class AI_ {
                     bool emp_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                         [&](const SuperWeapon& sup){return sup.player != pid && sup.type == EB;});
                     bool lightning_valid = (game_info.super_weapon_cd[pid][LS] <= 0) && (SUPER_WEAPON_INFO[LS][3] <= avail_money);
-                    if (raw_f_succ <= 3 && emp_active && lightning_valid) {
+                    if (raw_f_succ <= EMP_HANDLE_THRESH && emp_active && lightning_valid) {
                         Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3]);
                         logger.err("LS: " + opl.str());
                         if (opl > best_result) best_result = opl;
@@ -334,38 +389,8 @@ class AI_ {
                     }
                 }
             }
-
-            // debug 专用
-            Simulator s(game_info);
-            s.verbose = 1;
-            if (pid == 0) {
-                // Add player0's operation
-                for (auto &op : ops) s.add_operation_of_player(0, op);
-                // Apply player0's operation
-                s.apply_operations_of_player(0);
-                // Add player1's operation
-                // Apply player1's operation
-                s.apply_operations_of_player(1);
-                // Next round
-                s.next_round();
-            } else {
-                // Add player1's operation
-                for (auto &op : ops) s.add_operation_of_player(1, op);
-                // Apply player1's operation
-                s.apply_operations_of_player(1);
-                // Next round
-                s.next_round();
-                // Add player0's operation
-                // Apply player0's operation
-                s.apply_operations_of_player(0);
-            }
-            pred = "pred: ";
-            for (const Ant& a : s.get_info().ants) pred += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
         }
-
-        Logger logger;
     
-    private:
         // 当前可用钱数（计及即将执行操作的钱）
         int avail_money;
 
@@ -375,12 +400,10 @@ class AI_ {
         // 计划任务队列，按时间升序排列
         std::priority_queue<Scheduled_task> schedule_queue;
 
-        std::string pred;
-
         // 模拟的回合数
         static int get_sim_round(int curr_round) {
-            if (curr_round < 90) return 40 + curr_round / 3;
-            return 70;
+            if (curr_round < 150) return 50 + curr_round / 3;
+            return 100;
         }
 
         static constexpr Pos FIRST_TOWER_POS[2] {{4, 9}, {14, 9}};
@@ -388,6 +411,8 @@ class AI_ {
 
         static constexpr int MIN_TOWER_DIST = 4;
         static constexpr double UPGRADE_COST_MULT = 0.75;
+
+        static constexpr int EMP_HANDLE_THRESH = 3;
 };
 
 
@@ -411,8 +436,26 @@ int main() {
             c.read_opponent_operations();
             // Apply opponent operations to game state
             c.apply_opponent_operations();
+            // Parallel Simulation
+            Simulator fixer(c.get_info());
+            fixer.next_round();
             // Read round info from judger
             c.read_round_info();
+            // overwrite incorrect tower cd!
+            bool id_same = true;
+            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
+            std::vector<Tower>& editing_tower = c.info.towers;
+            assert(correct_tower.size() == editing_tower.size());
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
+            if (!id_same) {
+                std::string msg("corr:{");
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
+                msg += "} real:{";
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
+                ai.logger.err(msg + "}");
+                assert(false);
+            }
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
         } else // Game process when you are player 1
         {
             // Read opponent operations from judger
@@ -427,8 +470,26 @@ int main() {
             c.send_self_operations();
             // Apply operations to game state
             c.apply_self_operations();
+            // Parallel Simulation
+            Simulator fixer(c.get_info());
+            fixer.next_round();
             // Read round info from judger
             c.read_round_info();
+            // overwrite incorrect tower cd!
+            bool id_same = true;
+            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
+            std::vector<Tower>& editing_tower = c.info.towers;
+            assert(correct_tower.size() == editing_tower.size());
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
+            if (!id_same) {
+                std::string msg("corr:{");
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
+                msg += "} real:{";
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
+                ai.logger.err(msg + "}");
+                assert(false);
+            }
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
         }
     }
 
