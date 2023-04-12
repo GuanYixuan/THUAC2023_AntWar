@@ -351,17 +351,17 @@ struct TowerInfo
  */
 constexpr TowerInfo TOWER_INFO[] = {
     {5, 2, 2},  // ID = 0
-    {15, 2, 2}, // ID = 1
+    {20, 2, 2}, // ID = 1
     {6, 1, 3},  // ID = 2
     {16, 4, 3}, // ID = 3
     {}, {}, {}, {}, {}, {}, {}, // Padding
-    {35, 2, 2}, // ID = 11
+    {35, 2, 3}, // ID = 11
     {15, 2, 2}, // ID = 12
-    {50, 4, 3}, // ID = 13
+    {50, 3, 3}, // ID = 13
     {}, {}, {}, {}, {}, {}, {}, // Padding
     {8, 0.5, 3}, // ID = 21
-    {10, 1, 4},  // ID = 22
-    {13, 2, 6},   // ID = 23
+    {7, 1, 4},  // ID = 22
+    {15, 2, 6},   // ID = 23
     {}, {}, {}, {}, {}, {}, {}, // Padding
     {35, 4, 4}, // ID = 31
     {30, 3, 2}, // ID = 32 
@@ -398,11 +398,12 @@ struct Tower
      * times only appears once when returned).
      * @see Tower::find_targets for target searching process.
      */
-    std::vector<int> attack(std::vector<Ant>& ants)
+    std::vector<int> attack(std::vector<Ant>& ants, bool verbose = false)
     {
         std::vector<int> attacked_idxs;
         // Count down CD
         cd = std::max(cd - 1, 0);
+        if (verbose) fprintf(stderr, "Tower %2d: cd%d", id, cd);
         if (cd <= 0) // Ready to attack
         {
             // How many times the tower will try to find targets in this turn
@@ -410,10 +411,13 @@ struct Tower
             // How many targets the tower should find each time (maybe less than required number)
             int target_num = type == Double ? 2 : 1;
             // Find and action
+            if (verbose) fprintf(stderr, " time%d", time);
             while (time--)
             {
                 std::vector<int> target_idxs = find_targets(ants, target_num);
                 std::vector<int> attackable_idxs = find_attackable(ants, target_idxs);
+                if (verbose && target_idxs.size()) fprintf(stderr, " targ%d", ants[target_idxs[0]].id);
+                if (verbose && attackable_idxs.size()) fprintf(stderr, " atk%d", ants[attackable_idxs[0]].id);
                 for (int idx: attackable_idxs)
                     action(ants[idx]);
                 attacked_idxs.insert(attacked_idxs.end(), attackable_idxs.begin(), attackable_idxs.end());
@@ -425,6 +429,7 @@ struct Tower
             if (!attacked_idxs.empty())
                 reset_cd();
         }
+        if (verbose) fprintf(stderr, "\n");
         return attacked_idxs;
     }
 

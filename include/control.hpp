@@ -22,8 +22,9 @@
  */
 class Controller
 {
-private:
+public:
     GameInfo info;                              ///< Current game information
+private:
     std::vector<Operation> self_operations;     ///< Self operations which are about to be sent
     std::vector<Operation> opponent_operations; ///< Opponent's operations received from judger
 
@@ -186,8 +187,6 @@ public:
         // 2) apply opponent's operations
         for (auto& op: opponent_operations)
             info.apply_operation(!self_player_id, op);
-        // 3) apply active super weapons
-        info.apply_active_super_weapons(!self_player_id);
     }
 
     /**
@@ -229,8 +228,6 @@ public:
         // 2) apply self operations
         for (auto& op: self_operations)
             info.apply_operation(self_player_id, op);
-        // 3) apply active super weapons
-        info.apply_active_super_weapons(self_player_id);
     }
 
     /**
