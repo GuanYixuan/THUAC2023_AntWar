@@ -16,6 +16,8 @@
 #include <cmath>
 #include "optional.hpp"
 
+#include "logger.hpp"
+
 /**
  * @brief Max number of rounds.
  */
@@ -246,7 +248,17 @@ struct Ant
      */
     Ant(int id, int player, int x, int y, int hp, int level, int age, AntState state)
         : id(id), player(player), x(x), y(y), hp(hp), level(level), age(age), state(state), evasion(0) {}
-    
+
+    std::string str(bool bracket = false) const {
+        std::string ans;
+        if (bracket) ans += '[';
+        ans += str_wrap("id%d p%d (%2d,%2d) hp%d", id, player, x, y, hp);
+        if (evasion) ans += " E";
+        if (evasion == 2) ans += 'E';
+        if (bracket) ans += ']';
+        return ans;
+    }
+
     /**
      * @brief Move the ant in a specified direction.
      * @param direction Index of the direction.
@@ -389,6 +401,14 @@ struct Tower
         : id(id), player(player), x(x), y(y), type(type), cd(cd)
     {
         upgrade(type);
+    }
+
+    std::string str(bool bracket = false) const {
+        std::string ans;
+        if (bracket) ans += '[';
+        ans += str_wrap("p%d id%d tp%02d (%2d,%2d) cd%d", player, id, (int)type, x, y, cd);
+        if (bracket) ans += ']';
+        return ans;
     }
 
     /**
@@ -756,6 +776,47 @@ struct Operation
      */
     Operation(OperationType type, int arg0 = INVALID_ARG, int arg1 = INVALID_ARG)
         : type(type), arg0(arg0), arg1(arg1) {}
+
+    std::string wrap_pos() const {
+        return str_wrap("(%2d,%2d)", arg0, arg1);
+    }
+    std::string str(bool bracket = false) const {
+        std::string ans;
+        if (bracket) ans += '[';
+        switch (type) {
+        case BuildTower:
+            ans += "b" + wrap_pos();
+            break;
+        case UpgradeTower:
+            ans += str_wrap("%d^=%d", arg0, arg1);
+            break;
+        case DowngradeTower:
+            ans += str_wrap("!%d", arg0);
+            break;
+        case UseLightningStorm:
+            ans += "LS" + wrap_pos();
+            break;
+        case UseEmpBlaster:
+            ans += "EMP" + wrap_pos();
+            break;
+        case UseDeflector:
+            ans += "DFL" + wrap_pos();
+            break;
+        case UseEmergencyEvasion:
+            ans += "EVA" + wrap_pos();
+            break;
+        case UpgradeGenerationSpeed:
+            ans += "Base:Speed";
+            break;
+        case UpgradeGeneratedAnt:
+            ans += "Base:Shield";
+            break;
+        default:
+            assert(false);
+        }
+        if (bracket) ans += ']';
+        return ans;
+    }
 
     friend std::ostream& operator<<(std::ostream& out, const Operation& op) 
     {

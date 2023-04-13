@@ -186,10 +186,10 @@ class Operation_list {
     }
 
     std::string str() const {
-        std::string ret("(");
-        for (const Operation& op : ops) ret += str_wrap("%2d ", op.type);
+        std::string ret = str_wrap("[s: %2d, f: %3d, c: %3d] [", res.succ_ant, res.first_succ, cost);
+        for (const Operation& op : ops) ret += op.str() + ' ';
         if (ops.size()) ret.pop_back();
-        return ret + str_wrap(") [s: %2d, f: %3d, c: %3d]", res.succ_ant, res.first_succ, cost);
+        return ret + ']';
     }
     // better than
     bool operator>(const Operation_list& other) const {
@@ -206,7 +206,7 @@ class AI_ {
 
         }
 
-        const std::vector<Operation>& ai_call_routine(int player_id, const GameInfo &game_info) {
+        const std::vector<Operation>& ai_call_routine(int player_id, const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             // 全局变量
             pid = player_id;
             info = &game_info;
@@ -218,10 +218,15 @@ class AI_ {
             avail_money = game_info.coins[player_id];
 
             // 模拟检查
-            ai_simulation_checker_pre(game_info);
+            ai_simulation_checker_pre(game_info, opponent_op);
+
+            // 输出对方操作
+            std::string enemy_op = "opponent_op:";
+            for (const Operation& op : opponent_op) enemy_op += ' ' + op.str(true);
+            if (opponent_op.size()) logger.err(enemy_op);
 
             // 主决策
-            ai_main(game_info); // 暂时维持原本的传参模式
+            ai_main(game_info, opponent_op); // 暂时维持原本的传参模式
 
             // 模拟检查
             ai_simulation_checker_pos(game_info);
@@ -232,16 +237,17 @@ class AI_ {
     private:
         std::string pred;
         // 检查Simulator对一回合后的预测结果是否与实测符合
-        void ai_simulation_checker_pre(const GameInfo &game_info) {
+        void ai_simulation_checker_pre(const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             std::string cur;
-            for (const Ant& a : game_info.ants) cur += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
+            for (const Ant& a : game_info.ants) cur += a.str(true);
             if (cur != pred && game_info.round > 0) {
-                logger.err("[w] Predition and truth differ for round %d", game_info.round);
+                if (opponent_op.size()) logger.err("Predition and truth differ for round %d (opponent act)", game_info.round);
+                else logger.err("[w] Predition and truth differ for round %d", game_info.round);
                 logger.err("Pred: " + pred);
                 logger.err("Truth:" + cur);
 
-                std::string tow = "tow: ";
-                for (const Tower& t : game_info.towers) tow += str_wrap("(id:%3d, cd:%2d) ", t.id, t.cd);
+                std::string tow = "Towers: ";
+                for (const Tower& t : game_info.towers) tow += t.str(true);
                 logger.err(tow);
             }
         }
@@ -271,10 +277,10 @@ class AI_ {
                 s.apply_operations_of_player(0);
             }
             pred = "";
-            for (const Ant& a : s.get_info().ants) pred += str_wrap("(id:%3d, x:%2d, y:%2d, hp:%2d) ", a.id, a.x, a.y, a.hp);
+            for (const Ant& a : s.get_info().ants) pred += a.str(true);
         }
 
-        void ai_main(const GameInfo &game_info) {
+        void ai_main(const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             // 公共变量
             int sim_round = get_sim_round(game_info.round);
             int tower_num = game_info.tower_num_of_player(pid);
@@ -304,7 +310,7 @@ class AI_ {
                 if (best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
                     // 搜索：建塔
                     int build_cost = game_info.build_tower_cost(tower_num);
-                    if ((build_cost < 120 || raw_f_succ <= 5) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
+                    if ((build_cost < 120 || raw_f_succ <= 10) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
                         for (const Pos& pos : feasible_hl[pid]) {
                             const Operation& build_op = Util::build_op(pos);
                             if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST) continue;
@@ -402,7 +408,7 @@ class AI_ {
 
         // 模拟的回合数
         static int get_sim_round(int curr_round) {
-            if (curr_round < 150) return 50 + curr_round / 3;
+            if (curr_round < 90) return 70 + curr_round / 3;
             return 100;
         }
 
@@ -421,11 +427,12 @@ int main() {
     AI_ ai = AI_();
 
     Controller c;
+    std::vector<Operation> opponent_op;
     while (true) {
         if (c.self_player_id == 0) // Game process when you are player 0
         {
             // AI makes decisions
-            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info());
+            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info(), opponent_op);
             // Add operations to controller
             for (auto &op : ops) c.append_self_operation(op);
             // Send operations to judger
@@ -434,6 +441,7 @@ int main() {
             c.apply_self_operations();
             // Read opponent operations from judger
             c.read_opponent_operations();
+            opponent_op = c.get_opponent_operations();
             // Apply opponent operations to game state
             c.apply_opponent_operations();
             // Parallel Simulation
@@ -448,22 +456,24 @@ int main() {
             assert(correct_tower.size() == editing_tower.size());
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
             if (!id_same) {
-                std::string msg("corr:{");
+                std::string msg("pred:{");
                 for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
                 msg += "} real:{";
                 for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
+                ai.logger.err("[w] Inconsistent tower id");
                 ai.logger.err(msg + "}");
-                assert(false);
+                // assert(false);
             }
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
         } else // Game process when you are player 1
         {
             // Read opponent operations from judger
             c.read_opponent_operations();
+            opponent_op = c.get_opponent_operations();
             // Apply opponent operations to game state
             c.apply_opponent_operations();
             // AI makes decisions
-            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info());
+            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info(), opponent_op);
             // Add operations to controller
             for (auto &op : ops) c.append_self_operation(op);
             // Send operations to judger
@@ -482,12 +492,13 @@ int main() {
             assert(correct_tower.size() == editing_tower.size());
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
             if (!id_same) {
-                std::string msg("corr:{");
+                std::string msg("pred:{");
                 for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
                 msg += "} real:{";
                 for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
+                ai.logger.err("[w] Inconsistent tower id");
                 ai.logger.err(msg + "}");
-                assert(false);
+                // assert(false);
             }
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
         }
