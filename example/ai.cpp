@@ -201,11 +201,97 @@ class Operation_list {
 class AI_ {
     public:
         Logger logger;
-        AI_() : logger(RELEASE, LOG_SWITCH, LOG_STDOUT, LOG_LEVEL)
-        {
+        AI_() : logger(RELEASE, LOG_SWITCH, LOG_STDOUT, LOG_LEVEL) {}
 
+        // 游戏过程控制及预处理
+        void run_ai() {
+            Controller c;
+            std::vector<Operation> _opponent_op; // 对手上一次的行动，仅在保证其值正确的时候传递给ai_call_routine
+            while (true) {
+                if (c.self_player_id == 0) { // Game process when you are player 0
+                    // AI makes decisions
+                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.get_info(), _opponent_op);
+                    // Add operations to controller
+                    for (auto &op : ops) c.append_self_operation(op);
+                    // Send operations to judger
+                    c.send_self_operations();
+                    // Apply operations to game state
+                    c.apply_self_operations();
+                    // Read opponent operations from judger
+                    c.read_opponent_operations();
+                    _opponent_op = c.get_opponent_operations();
+                    // Apply opponent operations to game state
+                    c.apply_opponent_operations();
+                    // Parallel Simulation
+                    Simulator fixer(c.get_info());
+                    fixer.next_round();
+                    // Read round info from judger
+                    c.read_round_info();
+                    // Overwrite incorrect Tower::cd and Ant::evasion!
+                    pre_fix_cd(fixer, c.info);
+                    pre_fix_evasion(fixer, c.info);
+                } else  { // Game process when you are player 1
+                    // Read opponent operations from judger
+                    c.read_opponent_operations();
+                    _opponent_op = c.get_opponent_operations();
+                    // Apply opponent operations to game state
+                    c.apply_opponent_operations();
+                    // AI makes decisions
+                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.get_info(), _opponent_op);
+                    // Add operations to controller
+                    for (auto &op : ops) c.append_self_operation(op);
+                    // Send operations to judger
+                    c.send_self_operations();
+                    // Apply operations to game state
+                    c.apply_self_operations();
+                    // Parallel Simulation
+                    Simulator fixer(c.get_info());
+                    fixer.next_round();
+                    // Read round info from judger
+                    c.read_round_info();
+                    // Overwrite incorrect Tower::cd and Ant::evasion!
+                    pre_fix_cd(fixer, c.info);
+                    pre_fix_evasion(fixer, c.info);
+                }
+            }
+        }
+        // 预处理模块：覆盖错误的Tower::cd
+        void pre_fix_cd(const Simulator& fixer, GameInfo& incorrect) {
+            bool id_same = true;
+            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
+            std::vector<Tower>& editing_tower = incorrect.towers;
+            assert(correct_tower.size() == editing_tower.size());
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
+            if (!id_same) {
+                std::string msg("pred:{");
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
+                msg += "} real:{";
+                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
+                logger.err("[w] Inconsistent tower id");
+                logger.err(msg + "}");
+            }
+            for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
+        }
+        // 预处理模块：覆盖错误的Ant::evasion
+        void pre_fix_evasion(const Simulator& fixer, GameInfo& incorrect) {
+            bool id_same = true;
+            const std::vector<Ant>& correct_ant = fixer.get_info().ants;
+            std::vector<Ant>& editing_ant = incorrect.ants;
+            assert(correct_ant.size() == editing_ant.size());
+            for (int i = 0, lim = correct_ant.size(); i < lim; i++) id_same &= (correct_ant[i].id == editing_ant[i].id);
+            if (!id_same) {
+                std::string msg("pred:{");
+                for (int i = 0, lim = correct_ant.size(); i < lim; i++) msg += str_wrap("%2d,", correct_ant[i].id);
+                msg += "} real:{";
+                for (int i = 0, lim = correct_ant.size(); i < lim; i++) msg += str_wrap("%2d,", editing_ant[i].id);
+                logger.err("[w] Inconsistent ant id");
+                logger.err(msg + "}");
+                // assert(false); // 严格性有待观察
+            }
+            for (int i = 0, lim = correct_ant.size(); i < lim; i++) editing_ant[i].evasion = correct_ant[i].evasion;
         }
 
+        // 决策逻辑
         const std::vector<Operation>& ai_call_routine(int player_id, const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             // 全局变量
             pid = player_id;
@@ -225,7 +311,7 @@ class AI_ {
             for (const Operation& op : opponent_op) enemy_op += ' ' + op.str(true);
             if (opponent_op.size()) logger.err(enemy_op);
 
-            // 主决策
+            // 主决策逻辑
             ai_main(game_info, opponent_op); // 暂时维持原本的传参模式
 
             // 模拟检查
@@ -236,7 +322,7 @@ class AI_ {
 
     private:
         std::string pred;
-        // 检查Simulator对一回合后的预测结果是否与实测符合
+        // 模拟检查：检查Simulator对一回合后的预测结果是否与实测符合
         void ai_simulation_checker_pre(const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             std::string cur;
             for (const Ant& a : game_info.ants) cur += a.str(true);
@@ -251,7 +337,7 @@ class AI_ {
                 logger.err(tow);
             }
         }
-        // 检查Simulator对一回合后的预测结果是否与实测符合
+        // 模拟检查：检查Simulator对一回合后的预测结果是否与实测符合
         void ai_simulation_checker_pos(const GameInfo &game_info) {
             Simulator s(game_info);
             // s.verbose = 1;
@@ -280,6 +366,7 @@ class AI_ {
             for (const Ant& a : s.get_info().ants) pred += a.str(true);
         }
 
+        // 主决策逻辑
         void ai_main(const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             // 公共变量
             int sim_round = get_sim_round(game_info.round);
@@ -426,83 +513,7 @@ class AI_ {
 int main() {
     AI_ ai = AI_();
 
-    Controller c;
-    std::vector<Operation> opponent_op;
-    while (true) {
-        if (c.self_player_id == 0) // Game process when you are player 0
-        {
-            // AI makes decisions
-            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info(), opponent_op);
-            // Add operations to controller
-            for (auto &op : ops) c.append_self_operation(op);
-            // Send operations to judger
-            c.send_self_operations();
-            // Apply operations to game state
-            c.apply_self_operations();
-            // Read opponent operations from judger
-            c.read_opponent_operations();
-            opponent_op = c.get_opponent_operations();
-            // Apply opponent operations to game state
-            c.apply_opponent_operations();
-            // Parallel Simulation
-            Simulator fixer(c.get_info());
-            fixer.next_round();
-            // Read round info from judger
-            c.read_round_info();
-            // overwrite incorrect tower cd!
-            bool id_same = true;
-            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
-            std::vector<Tower>& editing_tower = c.info.towers;
-            assert(correct_tower.size() == editing_tower.size());
-            for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
-            if (!id_same) {
-                std::string msg("pred:{");
-                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
-                msg += "} real:{";
-                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
-                ai.logger.err("[w] Inconsistent tower id");
-                ai.logger.err(msg + "}");
-                // assert(false);
-            }
-            for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
-        } else // Game process when you are player 1
-        {
-            // Read opponent operations from judger
-            c.read_opponent_operations();
-            opponent_op = c.get_opponent_operations();
-            // Apply opponent operations to game state
-            c.apply_opponent_operations();
-            // AI makes decisions
-            std::vector<Operation> ops = ai.ai_call_routine(c.self_player_id, c.get_info(), opponent_op);
-            // Add operations to controller
-            for (auto &op : ops) c.append_self_operation(op);
-            // Send operations to judger
-            c.send_self_operations();
-            // Apply operations to game state
-            c.apply_self_operations();
-            // Parallel Simulation
-            Simulator fixer(c.get_info());
-            fixer.next_round();
-            // Read round info from judger
-            c.read_round_info();
-            // overwrite incorrect tower cd!
-            bool id_same = true;
-            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
-            std::vector<Tower>& editing_tower = c.info.towers;
-            assert(correct_tower.size() == editing_tower.size());
-            for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
-            if (!id_same) {
-                std::string msg("pred:{");
-                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", correct_tower[i].id);
-                msg += "} real:{";
-                for (int i = 0, lim = correct_tower.size(); i < lim; i++) msg += str_wrap("%2d,", editing_tower[i].id);
-                ai.logger.err("[w] Inconsistent tower id");
-                ai.logger.err(msg + "}");
-                // assert(false);
-            }
-            for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
-        }
-    }
+    ai.run_ai();
 
     return 0;
 }

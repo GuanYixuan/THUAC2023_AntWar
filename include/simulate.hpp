@@ -192,7 +192,7 @@ public:
      * @brief Get information about current game state.
      * @return A read-only (constant) reference to the current GameInfo object.
      */
-    const GameInfo& get_info()
+    const GameInfo& get_info() const
     {
         return info;
     }
