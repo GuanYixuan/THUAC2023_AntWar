@@ -66,6 +66,9 @@ class Util {
     static Operation upgrade_op(const Tower& t, TowerType tp) {
         return Operation(UpgradeTower, t.id, tp);
     }
+    static Operation upgrade_op(int tower_id, TowerType tp) {
+        return Operation(UpgradeTower, tower_id, tp);
+    }
     static Operation lightning_op(const Pos& pos) {
         return Operation(UseLightningStorm, pos.x, pos.y);
     }
@@ -83,6 +86,8 @@ struct Scheduled_task {
     int round;
     Task_type type;
     Operation op;
+
+    constexpr explicit Scheduled_task(const Operation& _op, int _round = 0) : round(_round), type(Task_type::tower), op(_op) {}
 
     bool operator<(const Scheduled_task& other) const {
         return round > other.round;
@@ -113,81 +118,93 @@ class Ant_simulator {
     static constexpr int INIT_HEALTH = 49;
 
     public:
-    Ant_simulator() : sim_info(*info) {
-        for (int i = 0; i < 2; i++) sim_info.bases[i].hp = INIT_HEALTH;
-    }
-    void apply_op(int _player_id, const Operation& op) {
-        imm_ops[_player_id].push_back(op);
-    }
-    Enemy_sim_result simulate(int round) {
-        int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
-        int first_succ = MAX_ROUND + 1; // 第一个突破防线的蚂蚁将出现在何时？
-        Simulator s(sim_info);
-
-        int _r = 0;
-        for (; _r < round; ++_r) {
-            if (pid == 0) {
-                // Add player0's operation
-                if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
-                // Apply player0's operation
-                s.apply_operations_of_player(0);
-                // Add player1's operation
-                if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
-                // Apply player1's operation
-                s.apply_operations_of_player(1);
-                // Next round
-                if (s.next_round() != GameState::Running) break;
-            } else {
-                // Add player1's operation
-                if (_r == 0) for (auto &op : imm_ops[1]) s.add_operation_of_player(1, op);
-                // Apply player1's operation
-                s.apply_operations_of_player(1);
-                // Next round
-                if (s.next_round() != GameState::Running) break;
-                // Add player0's operation
-                if (_r == 0) for (auto &op : imm_ops[0]) s.add_operation_of_player(0, op);
-                // Apply player0's operation
-                s.apply_operations_of_player(0);
-            }
-            if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
+        Ant_simulator(const std::vector<Scheduled_task>& my_task = {}) : sim_info(*info) {
+            ops[pid] = my_task;
+            for (int i = 0; i < 2; i++) sim_info.bases[i].hp = INIT_HEALTH;
         }
-        // assert(s.get_info().round >= 512 || _r == round);
-        for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+        Enemy_sim_result simulate(int round) {
+            int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
+            int first_succ = MAX_ROUND + 1; // 第一个突破防线的蚂蚁将出现在何时？
+            Simulator s(sim_info);
 
-        return Enemy_sim_result(base_damage[pid], 0, first_succ, base_damage[!pid]);
-    }
-    
-    GameInfo sim_info;
-    std::vector<Operation> imm_ops[2];
+            int _r = 0;
+            for (; _r < round; ++_r) {
+                if (pid == 0) {
+                    // Add player0's operation
+                    __add_op(s, _r, 0);
+                    // Apply player0's operation
+                    s.apply_operations_of_player(0);
+                    // Add player1's operation
+                    __add_op(s, _r, 1);
+                    // Apply player1's operation
+                    s.apply_operations_of_player(1);
+                    // Next round
+                    if (s.next_round() != GameState::Running) break;
+                } else {
+                    // Add player1's operation
+                    __add_op(s, _r, 1);
+                    // Apply player1's operation
+                    s.apply_operations_of_player(1);
+                    // Next round
+                    if (s.next_round() != GameState::Running) break;
+                    // Add player0's operation
+                    __add_op(s, _r, 0);
+                    // Apply player0's operation
+                    s.apply_operations_of_player(0);
+                }
+                if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
+            }
+            // assert(s.get_info().round >= 512 || _r == round);
+            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+
+            return Enemy_sim_result(base_damage[pid], 0, first_succ, base_damage[!pid]);
+        }
+
+        GameInfo sim_info;
+        std::vector<Scheduled_task> ops[2];
+
+    private:
+        void __add_op(Simulator& s, int _r, int player) {
+            std::vector<Scheduled_task>& tasks = ops[player];
+            for (int i = tasks.size()-1; i >= 0; i--) {
+                const Scheduled_task& curr_task = tasks[i];
+                if (curr_task.round == _r) {
+                    if (!s.add_operation_of_player(player, curr_task.op)) {
+                        fprintf(stderr, "[w] Adding invalid operation for player %d at sim round %d: %s\n", player, _r, curr_task.op.str(true).c_str());
+                    }
+                    tasks.erase(tasks.begin() + i);
+                }
+            }
+        }
 };
 
 class Operation_list {
     public:
-    std::vector<Operation> ops;
+    std::vector<Scheduled_task> ops;
     int cost;
 
     Enemy_sim_result res;
 
-    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : ops(_ops), cost(_cost) {
+    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : cost(_cost) {
+        for (const Operation& op : _ops) append(op);
         if (eval_round >= 0) evaluate(eval_round);
     };
-    void append(const Operation& op) {
-        ops.push_back(op);
+    void append(const Operation& op, int _round = 0) {
+        ops.emplace_back(op, _round);
     }
-    void append(const optional<Operation>& op) {
-        if (op) ops.push_back(op.value());
+    void append(const optional<Operation>& op, int _round = 0) {
+        if (op) append(op.value(), _round);
     }
 
     const Enemy_sim_result& evaluate(int _round) {
-        Ant_simulator sim;
-        for (const Operation& op : ops) sim.apply_op(pid, op);
+        Ant_simulator sim(ops);
         res = sim.simulate(_round);
         return res;
     }
 
     std::string str() const {
         std::string ret = str_wrap("[s: %2d, f: %3d, c: %3d] [", res.succ_ant, res.first_succ, cost);
-        for (const Operation& op : ops) ret += op.str() + ' ';
+        for (const Scheduled_task& task : ops) ret += task.op.str() + ' ';
         if (ops.size()) ret.pop_back();
         return ret + ']';
     }
@@ -379,13 +396,27 @@ class AI_ {
             }
 
             // 处理计划任务
+            bool conducted = false;
             while (schedule_queue.size() && schedule_queue.top() <= game_info.round) {
                 Scheduled_task task = schedule_queue.top();
                 schedule_queue.pop();
+
+                if (!game_info.is_operation_valid(pid, task.op)) {
+                    logger.err("[w] Discard invalid operation %s", task.op.str(true).c_str());
+                    continue;
+                }
+                int cost = -game_info.get_operation_income(pid, task.op);
+                if (avail_money - cost < 0) {
+                    logger.err("[w] Discarded operation %s, cost %d > %d", task.op.str(true).c_str(), cost, avail_money);
+                    continue;
+                }
+
+                conducted = true;
                 ops.push_back(task.op);
-                avail_money += game_info.get_operation_income(pid, task.op);
-                assert(avail_money >= 0);
+                avail_money -= cost;
+                logger.err("Conduct scheduled task: %s", task.op.str(true).c_str());
             }
+            if (conducted) return;
 
             // 塔操作搜索
             if (game_info.round >= 16) {
@@ -395,17 +426,25 @@ class AI_ {
                 logger.err("raw: " + best_result.str());
 
                 if (best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
-                    // 搜索：建塔
+                    // 搜索：建塔（+升级）
                     int build_cost = game_info.build_tower_cost(tower_num);
-                    if ((build_cost < 120 || raw_f_succ <= 10) && build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
+                    if (build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
                         for (const Pos& pos : feasible_hl[pid]) {
                             const Operation& build_op = Util::build_op(pos);
                             if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST) continue;
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
                             Operation_list opl({build_op}, sim_round, build_cost);
-                            logger.err("bud: " + opl.str());
+                            logger.err("bud:  " + opl.str());
+                            if (opl > best_result) best_result = opl;
 
+                            // 升级
+                            int build_upd_cost = build_cost + LEVEL2_TOWER_UPGRADE_PRICE * UPGRADE_COST_MULT;
+                            if (avail_money < build_upd_cost) continue; // 【其实很难讲塔的id会不会被别人抢先占用了】
+                            opl.append(Util::upgrade_op(game_info.next_tower_id, TowerType::Quick), 1);
+                            opl.cost = build_upd_cost;
+                            opl.evaluate(sim_round);
+                            logger.err("bud+: " + opl.str());
                             if (opl > best_result) best_result = opl;
                         }
                     }
@@ -415,7 +454,10 @@ class AI_ {
                         optional<Operation> down_op = nullopt;
                         if (it != game_info.towers.end()) { // 如果要降级
                             const Tower& t_down = *it;
-                            if (t_down.player != pid || game_info.upgrade_tower_cost(t_down.type) != -1 || game_info.is_shielded_by_emp(t_down)) continue;
+                            if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue;
+
+                            int up_cost = game_info.upgrade_tower_cost(t_down.type);
+                            if ((up_cost == LEVEL3_TOWER_UPGRADE_PRICE) || (up_cost == LEVEL2_TOWER_UPGRADE_PRICE && tower_num < 4)) continue;
 
                             down_op = Operation(DowngradeTower, t_down.id);
                             if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
@@ -469,16 +511,23 @@ class AI_ {
                         [&](const SuperWeapon& sup){return sup.player != pid && sup.type == EB;});
                     bool lightning_valid = (game_info.super_weapon_cd[pid][LS] <= 0) && (SUPER_WEAPON_INFO[LS][3] <= avail_money);
                     if (raw_f_succ <= EMP_HANDLE_THRESH && emp_active && lightning_valid) {
-                        Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3]);
+                        Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT);
                         logger.err("LS: " + opl.str());
                         if (opl > best_result) best_result = opl;
                     }
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
                     logger.err("best: " + best_result.str());
-                    for (const Operation& op : best_result.ops) {
-                        ops.push_back(op);
-                        avail_money += game_info.get_operation_income(pid, op);
+                    for (const Scheduled_task& task : best_result.ops) {
+                        if (task.round == 0) {
+                            ops.push_back(task.op);
+                            avail_money += game_info.get_operation_income(pid, task.op);
+                        } else {
+                            Scheduled_task temp = task;
+                            temp.round += game_info.round;
+                            schedule_queue.push(temp);
+                            logger.err("Operation scheduled at round %3d: %s", temp.round, task.op.str(true).c_str());
+                        }
                     }
                 }
             }
@@ -503,7 +552,8 @@ class AI_ {
         static constexpr Pos LIGHTNING_POS[2] {{3, 9}, {15, 9}};
 
         static constexpr int MIN_TOWER_DIST = 4;
-        static constexpr double UPGRADE_COST_MULT = 0.75;
+        static constexpr double UPGRADE_COST_MULT = 0.85;
+        static constexpr double LIGHTNING_MULT = 1.5;
 
         static constexpr int EMP_HANDLE_THRESH = 3;
 };
