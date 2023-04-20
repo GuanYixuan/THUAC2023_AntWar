@@ -127,6 +127,8 @@ class Ant_simulator {
             int first_succ = MAX_ROUND + 1; // 第一个突破防线的蚂蚁将出现在何时？
             Simulator s(sim_info);
 
+            for (int i = 0; i < 2; i++) std::sort(ops[i].begin(), ops[i].end(), Ant_simulator::__cmp_downgrade_last);
+
             int _r = 0;
             for (; _r < round; ++_r) {
                 if (pid == 0) {
@@ -164,6 +166,9 @@ class Ant_simulator {
         std::vector<Scheduled_task> ops[2];
 
     private:
+        static bool __cmp_downgrade_last(const Scheduled_task& a, const Scheduled_task& b) {
+            return a.op.type != DowngradeTower && b.op.type == DowngradeTower;
+        }
         void __add_op(Simulator& s, int _r, int player) {
             std::vector<Scheduled_task>& tasks = ops[player];
             for (int i = tasks.size()-1; i >= 0; i--) {
@@ -317,8 +322,18 @@ class AI_ {
             // 初始化
             ops.clear();
             logger.config(game_info.round);
-            logger.err("coin: %3d vs %3d", game_info.coins[pid], game_info.coins[!pid]);
             avail_money = game_info.coins[player_id];
+
+            // 例行Log
+            static constexpr int count_value[6] = {0, 15 / 5 * 4, 45 / 5 * 4, 105 / 5 * 4, 225 / 5 * 4, 465 / 5 * 4};
+            int tower_value[2] = {count_value[game_info.tower_num_of_player(0)], count_value[game_info.tower_num_of_player(1)]};
+            for (const Tower& t : game_info.towers) {
+                int u_cost = game_info.upgrade_tower_cost(t.type);
+                if (u_cost == LEVEL2_TOWER_UPGRADE_PRICE) tower_value[t.player] += LEVEL2_TOWER_UPGRADE_PRICE / 5 * 4;
+                if (u_cost == LEVEL3_TOWER_UPGRADE_PRICE) tower_value[t.player] += (LEVEL2_TOWER_UPGRADE_PRICE + LEVEL3_TOWER_UPGRADE_PRICE) / 5 * 4;
+            }
+            logger.err("coin: %3d (%3dC + %3dT) vs %3d (%3dC + %3dT)", tower_value[pid] + game_info.coins[pid], game_info.coins[pid],
+                tower_value[pid], tower_value[!pid] + game_info.coins[!pid], game_info.coins[!pid], tower_value[!pid]);
 
             // 模拟检查
             ai_simulation_checker_pre(game_info, opponent_op);
@@ -454,15 +469,15 @@ class AI_ {
                         optional<Operation> down_op = nullopt;
                         if (it != game_info.towers.end()) { // 如果要降级
                             const Tower& t_down = *it;
-                            if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue;
+                            if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
 
-                            int up_cost = game_info.upgrade_tower_cost(t_down.type);
+                            int up_cost = game_info.upgrade_tower_cost(t_down.type); // 不允许降级3级塔，仅在有4塔时允许降级2级塔
                             if ((up_cost == LEVEL3_TOWER_UPGRADE_PRICE) || (up_cost == LEVEL2_TOWER_UPGRADE_PRICE && tower_num < 4)) continue;
 
                             down_op = Operation(DowngradeTower, t_down.id);
                             if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
 
-                            downgrade_income = game_info.destroy_tower_income(tower_num);
+                            downgrade_income = game_info.get_operation_income(pid, down_op.value());
                         } // 否则不降级
 
                         for (const Tower& t_up : game_info.towers) {
@@ -509,11 +524,24 @@ class AI_ {
                     const SuperWeaponType EB = SuperWeaponType::EmpBlaster, LS = SuperWeaponType::LightningStorm;
                     bool emp_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                         [&](const SuperWeapon& sup){return sup.player != pid && sup.type == EB;});
-                    bool lightning_valid = (game_info.super_weapon_cd[pid][LS] <= 0) && (SUPER_WEAPON_INFO[LS][3] <= avail_money);
-                    if (raw_f_succ <= EMP_HANDLE_THRESH && emp_active && lightning_valid) {
-                        Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT);
-                        logger.err("LS: " + opl.str());
-                        if (opl > best_result) best_result = opl;
+                    if (raw_f_succ <= EMP_HANDLE_THRESH && emp_active && game_info.super_weapon_cd[pid][LS] <= 0) {
+                        if (SUPER_WEAPON_INFO[LS][3] <= avail_money) {
+                            Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT);
+                            logger.err("LS:    " + opl.str());
+                            if (opl > best_result) best_result = opl;
+                        } else {
+                            for (const Tower& t_down : game_info.towers) {
+                                if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
+                                Operation down_op(DowngradeTower, t_down.id);
+                                if (logger.warn_if(!game_info.is_operation_valid(pid, down_op), "invalid destruct(LS) attempt")) continue;
+
+                                int downgrade_income = game_info.get_operation_income(pid, down_op);
+                                if (downgrade_income + avail_money < SUPER_WEAPON_INFO[LS][3]) continue; // 钱不够
+                                Operation_list opl({down_op, Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT + downgrade_income);
+                                logger.err("LS(-): " + opl.str());
+                                if (opl > best_result) best_result = opl;
+                            }
+                        }
                     }
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
@@ -544,8 +572,8 @@ class AI_ {
 
         // 模拟的回合数
         static int get_sim_round(int curr_round) {
-            if (curr_round < 90) return 70 + curr_round / 3;
-            return 100;
+            if (curr_round < 150) return 70 + curr_round / 3;
+            return 120;
         }
 
         static constexpr Pos FIRST_TOWER_POS[2] {{4, 9}, {14, 9}};
