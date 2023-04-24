@@ -182,6 +182,7 @@ private:
 
 public:
     bool verbose = 0;
+    int ants_killed[2] = {0, 0};
     /**
      * @brief Construct a new Simulator object from a GameInfo instance. Current game state will be copied.
      * @param info The GaemInfo instance as data source.
@@ -257,6 +258,7 @@ public:
         info.global_pheromone_attenuation();
         info.update_pheromone_for_ants();
         // 5) Clear dead and succeeded ants
+        for (int i = 0; i < 2; i++) ants_killed[!i] = std::count_if(info.ants.begin(), info.ants.end(), [i](const Ant& ant){ return ant.state == AntState::Fail && ant.player == i; });
         info.clear_dead_and_succeeded_ants();
         // 6) Barracks generate new ants
         generate_ants();
