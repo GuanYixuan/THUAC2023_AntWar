@@ -37,7 +37,7 @@ private:
     void update_towers(std::vector<Tower>& new_towers)
     {
         info.towers = std::move(new_towers);
-        info.next_tower_id = info.towers.empty() ? 0 : info.towers.back().id + 1;
+        info.next_tower_id = std::max(info.next_tower_id, info.towers.empty() ? 0 : info.towers.back().id + 1);
     }
 
     /**
@@ -147,9 +147,11 @@ public:
     void read_round_info()
     {
         // 1. Read
+        // fprintf(stderr, "Read round::Read\n");
         auto result = ::read_round_info();
         // 2. Update
         // 1) Towers
+        // fprintf(stderr, "Read round::Towers\n");
         update_towers(result.towers);
         // 2) Ants and Pheromone
         update_ants(result.ants);
