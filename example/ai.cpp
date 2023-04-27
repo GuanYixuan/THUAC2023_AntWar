@@ -15,10 +15,13 @@ constexpr int LOG_LEVEL = 0;
 int pid; // 玩家(我的)编号
 int ants_killed[2]; // 双方击杀蚂蚁数
 int tower_value[2]; // 双方的固定资产（不包含被EMP的）
+int avail_value[2]; // 双方的可用资产（不包含被EMP的）
 int banned_tower_count[2]; // 双方因EMP被冻结的塔数
 int banned_tower_value[2]; // 双方因EMP而不可用的固定资产
 
-const GameInfo* info;
+int warn_streak; // 连续处于“响应状态”的回合数
+
+const GameInfo* info; // info的一份拷贝，用于Util等地
 
 struct Pos {
     int x;
@@ -133,8 +136,17 @@ class Util {
     static Operation lightning_op(const Pos& pos) {
         return Operation(UseLightningStorm, pos.x, pos.y);
     }
-    static Operation emp_op(const Pos& pos) {
+    static Operation EMP_op(const Pos& pos) {
         return Operation(UseEmpBlaster, pos.x, pos.y);
+    }
+    static Operation DFL_op(const Pos& pos) {
+        return Operation(UseDeflector, pos.x, pos.y);
+    }
+    static Operation EVA_op(const Pos& pos) {
+        return Operation(UseEmergencyEvasion, pos.x, pos.y);
+    }
+    static Operation EVA_op(const Ant& a) {
+        return Operation(UseEmergencyEvasion, a.x, a.y);
     }
 };
 
@@ -158,17 +170,19 @@ struct Scheduled_task {
     }
 };
 
-// 针对敌方的模拟结果
-struct Enemy_sim_result {
-    int succ_ant;
+// 模拟结果类
+struct Sim_result {
+    int succ_ant; // 模拟过程中我方掉的血
     int ant_killed; // 被我方击杀的蚂蚁数
-    int first_succ;
-    int dmg_dealt;
+    int first_succ; // 模拟过程中我方第一次掉血的回合数（相对时间）
 
-    constexpr Enemy_sim_result() : succ_ant(99), ant_killed(99), first_succ(0), dmg_dealt(0) {};
+    int dmg_dealt; // 模拟过程中对方掉的血
+    int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
 
-    constexpr Enemy_sim_result(int _succ, int _old, int _first, int _dmg)
-    : succ_ant(_succ), ant_killed(_old), first_succ(_first), dmg_dealt(_dmg) {}
+    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1) {}
+
+    constexpr Sim_result(int _succ, int _kill, int _first, int _dmg, int _dmg_time)
+    : succ_ant(_succ), ant_killed(_kill), first_succ(_first), dmg_dealt(_dmg), dmg_time(_dmg_time) {}
 
 };
 /**
@@ -183,9 +197,10 @@ class Ant_simulator {
             ops[pid] = my_task;
             for (int i = 0; i < 2; i++) sim_info.bases[i].hp = INIT_HEALTH;
         }
-        Enemy_sim_result simulate(int round) {
+        Sim_result simulate(int round) {
             int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
-            int first_succ = MAX_ROUND + 1; // 第一个突破防线的蚂蚁将出现在何时？
+            int first_succ = MAX_ROUND + 1;
+            int dmg_time = MAX_ROUND + 1;
             Simulator s(sim_info);
 
             for (int i = 0; i < 2; i++) std::sort(ops[i].begin(), ops[i].end(), Ant_simulator::__cmp_downgrade_last);
@@ -216,11 +231,12 @@ class Ant_simulator {
                     s.apply_operations_of_player(0);
                 }
                 if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
+                if (dmg_time > MAX_ROUND && INIT_HEALTH != s.get_info().bases[!pid].hp) dmg_time = _r;
             }
             // assert(s.get_info().round >= 512 || _r == round);
             for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
 
-            return Enemy_sim_result(base_damage[pid], s.ants_killed[pid], first_succ, base_damage[!pid]);
+            return Sim_result(base_damage[pid], s.ants_killed[pid], first_succ, base_damage[!pid], dmg_time);
         }
 
         GameInfo sim_info;
@@ -253,7 +269,7 @@ class Operation_list {
     std::vector<Scheduled_task> ops;
     int cost; // 行动序列的“损失函数”，注意这往往不是真实花费
 
-    Enemy_sim_result res;
+    Sim_result res;
 
     explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _cost = 0) : cost(_cost) {
         for (const Operation& op : _ops) append(op);
@@ -266,20 +282,22 @@ class Operation_list {
         if (op) append(op.value(), _round);
     }
 
-    const Enemy_sim_result& evaluate(int _round) {
+    const Sim_result& evaluate(int _round) {
         Ant_simulator sim(ops);
         res = sim.simulate(_round);
         return res;
     }
 
     std::string defence_str() const {
-        std::string ret = str_wrap("[s: %2d, f: %3d, c: %3d] [", res.succ_ant, res.first_succ, cost);
+        std::string ret;
+        if (res.succ_ant) ret += str_wrap("[s: %2d, f: %3d, c: %3d] [", res.succ_ant, res.first_succ, cost);
+        else ret += str_wrap("[f: %3d, c: %3d] [", res.first_succ, cost);
         for (const Scheduled_task& task : ops) ret += task.op.str() + ' ';
         if (ops.size()) ret.pop_back();
         return ret + ']';
     }
     std::string attack_str() const {
-        std::string ret = str_wrap("[dmg: %2d, c: %3d] [", res.dmg_dealt, cost);
+        std::string ret = str_wrap("[dmg: %d, f: %2d, c: %3d] [", res.dmg_dealt, res.dmg_time, cost);
         for (const Scheduled_task& task : ops) ret += task.op.str() + ' ';
         if (ops.size()) ret.pop_back();
         return ret + ']';
@@ -414,7 +432,6 @@ class AI_ {
             for (int i = 0; i < 2; i++) {
                 banned_tower_count[i] = banned_tower_value[i] = 0;
                 tower_value[i] = Util::ACCU_REFUND[game_info.tower_num_of_player(i)];
-
             }
             for (const Tower& t : game_info.towers) {
                 int u_cost = game_info.upgrade_tower_cost(t.type);
@@ -424,6 +441,7 @@ class AI_ {
                     tower_value[t.player] -= Util::TOWER_REFUND[banned_tower_count[t.player]];
                 } else tower_value[t.player] += Util::LEVEL_REFUND[Util::tower_level(t)];
             }
+            for (int i = 0; i < 2; i++) avail_value[i] = tower_value[i] + game_info.coins[i];
 
             // 例行Log
             std::string disp = str_wrap("HP:%2d/%2d   ", game_info.bases[pid].hp, game_info.bases[!pid].hp);
@@ -547,8 +565,14 @@ class AI_ {
 
                 bool emp_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                     [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::EmpBlaster;});
-                bool warning_status = emp_active || raw_f_succ <= 10;
-                if (best_result.res.first_succ < 20) { // 如果啥事不干基地会扣血
+                bool dfl_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
+                    [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::Deflector;});
+                bool warning_status = emp_active || dfl_active || raw_f_succ <= 10;
+                if (best_result.res.first_succ >= 20) warn_streak = 0;
+                else { // 如果啥事不干基地会扣血
+                    warn_streak++;
+                    warning_status |= (warn_streak > 5);
+
                     // 搜索：建塔（+升级）
                     int build_cost = game_info.build_tower_cost(tower_num);
                     if (build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
@@ -680,30 +704,69 @@ class AI_ {
                 }
             }
 
-            // 进攻搜索
-            Operation_list best_attack(raw_result);
-            constexpr SuperWeaponType EB = SuperWeaponType::EmpBlaster;
-            if (raw_f_succ >= 40 && avail_money >= 300 && game_info.super_weapon_cd[pid][EB] <= 0 && game_info.coins[!pid] <= 135) {
-                for (int x = 0; x < MAP_SIZE; x++) {
-                    for (int y = 0; y < MAP_SIZE; y++) {
-                        Pos p{x, y};
-                        if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
+            // 进攻搜索：EVA和DFL
+            // 总体思想：我不着急，钱尚可，要求2~3回合内打到对面基地
+            bool attacking = false;
+            Operation_list EVA_raw({}, EVA_SIM_ROUND, -1), best_EVA(EVA_raw);
+            Operation_list DFL_raw({}, DFL_SIM_ROUND, -1), best_DFL(DFL_raw);
+            constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion), DFL(SuperWeaponType::Deflector);
+            if (raw_f_succ >= 30 && avail_money >= 230) {
+                if (game_info.super_weapon_cd[pid][EVA] <= 0) for (const Ant& a : game_info.ants) {
+                    if (a.player != pid) continue;
 
-                        int banned_money = Util::EMP_banned_money(p, !pid);
-                        bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
-                        bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
-                        if (op_enough_cash && op_ls_ready) continue;
-                        Operation_list opl({Util::emp_op(p)}, EMP_SIM_ROUND, -banned_money);
+                    Operation_list opl({Util::EVA_op(a)}, EVA_SIM_ROUND); // 暂时不知设什么cost好
+                    opl.cost = opl.res.dmg_time;
 
-                        if (opl.attack_better_than(best_attack)) best_attack = opl;
-                        if (opl.res.dmg_dealt > raw_result.res.dmg_dealt) logger.err("atk: Ban:%d/%2d %s", Util::EMP_tower_count(p, !pid), banned_money, opl.attack_str().c_str());
-                    }
+                    if (opl.attack_better_than(best_EVA)) best_EVA = opl;
+                    if (opl.res.dmg_dealt > EVA_raw.res.dmg_dealt) logger.err("Potential EVA %s", opl.attack_str().c_str());
                 }
-                logger.err("best_atk: " + best_attack.attack_str());
+                if (game_info.super_weapon_cd[pid][DFL] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                    Pos p{x, y};
+                    if (MAP_PROPERTY[x][y] == -1) continue;
 
-                // if (best_attack.res.dmg_dealt >= 5) {
-                //     logger.err("")
-                // }
+                    Operation_list opl({Util::DFL_op(p)}, DFL_SIM_ROUND); // 暂时不知设什么cost好
+                    opl.cost = opl.res.dmg_time;
+
+                    if (opl.attack_better_than(best_DFL)) best_DFL = opl;
+                    if (opl.res.dmg_dealt > DFL_raw.res.dmg_dealt) logger.err("Potential DFL %s", opl.attack_str().c_str());
+                }
+
+                if (game_info.super_weapon_cd[pid][EVA] <= 0) if (best_EVA.res.dmg_dealt && best_EVA.res.dmg_time == 0 && !attacking) {
+                    logger.err("Conduct EVA attack " + best_EVA.attack_str());
+                    ops.push_back(best_EVA.ops.front().op);
+                    avail_money -= SUPER_WEAPON_INFO[EVA][3];
+                    attacking = true;
+                }
+            }
+
+            // 进攻搜索：EMP
+            // 总体思想：我不着急，钱足够多，对面放不出LS（钱不够多或冷却中）
+            Operation_list EMP_raw({}, EMP_SIM_ROUND), best_EMP(EMP_raw);
+            constexpr SuperWeaponType EB = SuperWeaponType::EmpBlaster;
+            bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
+            bool economy_advantage = avail_money + tower_value[pid] - avail_value[!pid] >= 200;
+            if (raw_f_succ >= 40 && avail_money >= 300 && game_info.super_weapon_cd[pid][EB] <= 0 && (game_info.coins[!pid] <= 135 || economy_advantage || !op_ls_ready)) {
+                for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                    Pos p{x, y};
+                    if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
+
+                    int banned_money = Util::EMP_banned_money(p, !pid);
+                    bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
+                    if (op_enough_cash && op_ls_ready) continue;
+                    Operation_list opl({Util::EMP_op(p)}, EMP_SIM_ROUND, -banned_money);
+
+                    if (opl.attack_better_than(best_EMP)) best_EMP = opl;
+                    if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2)
+                        logger.err("atk: Ban:%d/%2d %s", Util::EMP_tower_count(p, !pid), banned_money, opl.attack_str().c_str());
+                }
+                logger.err("best_atk: " + best_EMP.attack_str());
+
+                if (best_EMP.res.dmg_dealt >= 4 && !attacking) {
+                    logger.err("Conduct EMP attack " + best_EMP.attack_str());
+                    ops.push_back(best_EMP.ops.front().op);
+                    avail_money -= SUPER_WEAPON_INFO[EB][3];
+                    attacking = true;
+                }
             }
         }
     
@@ -737,6 +800,8 @@ class AI_ {
         static constexpr int EMP_HANDLE_THRESH = 3;
 
         static constexpr int EMP_SIM_ROUND = 30;
+        static constexpr int EVA_SIM_ROUND = 2;
+        static constexpr int DFL_SIM_ROUND = 3;
 };
 
 
