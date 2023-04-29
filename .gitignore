@@ -5,3 +5,7 @@
 .vscode/
 docs/
 README.md
+
+py_script/__pycache__/
+py_script/main.py
+downloads/
