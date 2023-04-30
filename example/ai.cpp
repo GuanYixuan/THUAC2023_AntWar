@@ -252,7 +252,7 @@ class Ant_simulator {
 
     private:
 
-        static constexpr int DANGER_RANGE = 3;
+        static constexpr int DANGER_RANGE = 4;
         // 将降级操作排到最后(因为操作从最后开始加)
         static bool __cmp_downgrade_last(const Scheduled_task& a, const Scheduled_task& b) {
             return a.op.type != DowngradeTower && b.op.type == DowngradeTower;
@@ -580,7 +580,7 @@ class AI_ {
             // 塔操作搜索
             Operation_list raw_result({}, sim_round, 0);
             int raw_f_succ = raw_result.res.first_succ;
-            if (game_info.round >= 16) {
+            if (game_info.round >= 12) {
                 Operation_list best_result(raw_result);
                 logger.err("raw: " + best_result.defence_str());
 
@@ -594,40 +594,65 @@ class AI_ {
                     warn_streak++;
                     warning_status |= (warn_streak > 5);
 
-                    // 搜索：建塔（+升级）
-                    int build_cost = game_info.build_tower_cost(tower_num);
-                    if (build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
-                        for (const Pos& pos : feasible_hl[pid]) {
-                            const Operation& build_op = Util::build_op(pos);
-                            if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && !emp_active) continue;
-                            if (!game_info.is_operation_valid(pid, build_op)) continue;
+                    // 搜索：（拆除+）建塔（+升级）
+                    for (auto it = game_info.towers.begin(); ; it++) {
+                        int downgrade_income = 0; // 降级收入
+                        optional<Operation> down_op = nullopt;
+                        if (it != game_info.towers.end()) { // 如果要降级
+                            const Tower& t_down = *it;
+                            if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
 
-                            Operation_list opl_lv1({build_op}, sim_round, build_cost);
-                            logger.err("bud:  " + opl_lv1.defence_str());
-                            if (opl_lv1 > best_result) best_result = opl_lv1;
+                            int down_level = Util::tower_level(t_down);
+                            if ((down_level == 2 && tower_num < 3) && !warning_status) continue; // 非紧急情况下，仅在有4塔时允许降级2级塔
+                            if (down_level == 3 && !emp_active) continue; // 非EMP情况下，不允许降级3级塔
 
-                            // 升级
-                            if (avail_money < build_cost + Util::UPGRADE_COST[1]) continue; // 【其实很难讲塔的id会不会被别人抢先占用了】
-                            for (const TowerType* const upd_path : BUILD_SERIES) {
-                                if (upd_path[0] == TowerType::Heavy && !warning_status) continue; // HEAVY->CANNON路线仅限紧急情况
+                            down_op = Operation(DowngradeTower, t_down.id);
+                            if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
 
-                                Operation_list opl_lv2(opl_lv1);
-                                opl_lv2.append(Util::upgrade_op(game_info.next_tower_id, upd_path[0]), 1);
-                                opl_lv2.cost += LEVEL2_TOWER_UPGRADE_PRICE * UPGRADE_COST_MULT;
-                                opl_lv2.evaluate(sim_round);
-                                logger.err("bud+: " + opl_lv2.defence_str());
-                                if (opl_lv2 > best_result) best_result = opl_lv2;
+                            downgrade_income = game_info.get_operation_income(pid, down_op.value());
+                        } // 否则不降级
 
-                                if (avail_money < build_cost + Util::UPGRADE_COST[1] + Util::UPGRADE_COST[2] || !warning_status) continue; // 跳级到3级仅限紧急情况
-                                Operation_list opl_lv3(opl_lv2);
-                                opl_lv3.append(Util::upgrade_op(game_info.next_tower_id, upd_path[1]), 2);
-                                opl_lv3.cost += LEVEL3_TOWER_UPGRADE_PRICE * UPGRADE_COST_MULT;
-                                opl_lv3.evaluate(sim_round);
-                                logger.err("bud++: " + opl_lv3.defence_str());
-                                if (opl_lv3 > best_result) best_result = opl_lv3;
+                        // 新建
+                        int build_cost = game_info.build_tower_cost(tower_num) - downgrade_income;
+                        if (build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
+                            for (const Pos& pos : feasible_hl[pid]) {
+                                const Operation& build_op = Util::build_op(pos);
+                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && !emp_active) continue;
+                                if (!game_info.is_operation_valid(pid, build_op)) continue;
+
+                                Operation_list opl_lv1({build_op}, -1, game_info.build_tower_cost(tower_num));
+                                opl_lv1.append(down_op);
+
+                                opl_lv1.evaluate(sim_round);
+                                logger.err("bud:  " + opl_lv1.defence_str());
+                                if (opl_lv1 > best_result) best_result = opl_lv1;
+
+                                // 升级
+                                if (avail_money < build_cost + Util::UPGRADE_COST[1]) continue; // 【其实很难讲塔的id会不会被别人抢先占用了】
+                                for (const TowerType* const upd_path : BUILD_SERIES) {
+                                    if (upd_path[0] == TowerType::Heavy && !warning_status) continue; // HEAVY->CANNON路线仅限紧急情况
+                                    if (upd_path[0] == TowerType::Quick && upd_path[1] == TowerType::QuickPlus && !warning_status) continue; // QUICK+路线仅限紧急情况
+
+                                    Operation_list opl_lv2(opl_lv1);
+                                    opl_lv2.append(Util::upgrade_op(game_info.next_tower_id, upd_path[0]), 1);
+                                    opl_lv2.cost += LEVEL2_TOWER_UPGRADE_PRICE * UPGRADE_COST_MULT;
+                                    opl_lv2.evaluate(sim_round);
+                                    logger.err("bud+: " + opl_lv2.defence_str());
+                                    if (opl_lv2 > best_result) best_result = opl_lv2;
+
+                                    if (avail_money < build_cost + Util::UPGRADE_COST[1] + Util::UPGRADE_COST[2] || !warning_status) continue; // 跳级到3级仅限紧急情况
+                                    Operation_list opl_lv3(opl_lv2);
+                                    opl_lv3.append(Util::upgrade_op(game_info.next_tower_id, upd_path[1]), 2);
+                                    opl_lv3.cost += LEVEL3_TOWER_UPGRADE_PRICE * UPGRADE_COST_MULT;
+                                    opl_lv3.evaluate(sim_round);
+                                    logger.err("bud++: " + opl_lv3.defence_str());
+                                    if (opl_lv3 > best_result) best_result = opl_lv3;
+                                }
                             }
                         }
+                        if (it == game_info.towers.end()) break;
                     }
+
                     // 搜索：（拆除）+升级
                     for (auto it = game_info.towers.begin(); ; it++) {
                         int downgrade_income = 0; // 降级收入
@@ -636,9 +661,10 @@ class AI_ {
                             const Tower& t_down = *it;
                             if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
 
-                            int up_cost = game_info.upgrade_tower_cost(t_down.type);
-                            if ((up_cost == LEVEL2_TOWER_UPGRADE_PRICE && tower_num < 3) && !warning_status) continue; // 非紧急情况下，仅在有4塔时允许降级2级塔
-                            if (up_cost == LEVEL3_TOWER_UPGRADE_PRICE && !emp_active) continue; // 非EMP情况下，不允许降级3级塔
+                            int down_level = Util::tower_level(t_down);
+                            bool banned_lv3 = (down_level == 3) && (t_down.type == TowerType::Double || t_down.type == TowerType::MortarPlus);
+                            if ((down_level == 2 && tower_num < 3) && !warning_status) continue; // 非紧急情况下，仅在有4塔时允许降级2级塔
+                            if (banned_lv3 && !emp_active) continue; // 非EMP情况下，不允许降级3级塔
 
                             down_op = Operation(DowngradeTower, t_down.id);
                             if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
@@ -687,8 +713,8 @@ class AI_ {
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
                             Operation_list opl(opl_destroy);
-                            opl.append(build_op, 2);
-                            if (tower_level == 2) opl.append(Util::upgrade_op(game_info.next_tower_id, t.type), 3); // 这里也有id的抢占问题
+                            opl.append(build_op, 1);
+                            if (tower_level == 2) opl.append(Util::upgrade_op(game_info.next_tower_id, t.type), 2); // 这里也有id的抢占问题
                             opl.cost = build_cost;
 
                             opl.evaluate(sim_round);
@@ -698,7 +724,7 @@ class AI_ {
                     }
                     // 紧急处理：EMP
                     constexpr SuperWeaponType LS = SuperWeaponType::LightningStorm;
-                    if ((raw_f_succ <= EMP_HANDLE_THRESH || warn_streak > 5) && emp_active && game_info.super_weapon_cd[pid][LS] <= 0) {
+                    if ((raw_f_succ <= EMP_HANDLE_THRESH || warn_streak > 4) && emp_active && game_info.super_weapon_cd[pid][LS] <= 0) {
                         if (SUPER_WEAPON_INFO[LS][3] <= avail_money) {
                             Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT);
                             logger.err("LS:    " + opl.defence_str());
@@ -720,8 +746,10 @@ class AI_ {
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
                     logger.err("best: " + best_result.defence_str());
-                    if (best_result.res.first_succ <= raw_f_succ + 10 && best_result.cost >= 10 * (best_result.res.first_succ - raw_f_succ)) logger.err("[Result not taken]");
-                    else for (const Scheduled_task& task : best_result.ops) {
+                    // bool occupying_EMP = emp_active && best_result.res.first_succ <= raw_f_succ + 20 && 
+                    // if (best_result.res.first_succ <= raw_f_succ + 10 && best_result.cost >= 10 * (best_result.res.first_succ - raw_f_succ)) logger.err("[Result not taken]");
+                    // else
+                    for (const Scheduled_task& task : best_result.ops) {
                         if (task.round == 0) {
                             ops.push_back(task.op);
                             avail_money += game_info.get_operation_income(pid, task.op);
@@ -825,11 +853,11 @@ class AI_ {
         static constexpr double LIGHTNING_MULT = 3;
 
         static constexpr TowerType BUILD_SERIES[][2] = {
-            {TowerType::Quick, TowerType::Sniper}, {TowerType::Quick, TowerType::Double},
+            {TowerType::Quick, TowerType::Sniper}, {TowerType::Quick, TowerType::Double}, {TowerType::Quick, TowerType::QuickPlus},
             {TowerType::Mortar, TowerType::MortarPlus}, {TowerType::Heavy, TowerType::Cannon}};
         static constexpr TowerType UPDATE_SERIES[][2] = {{TowerType::Quick, TowerType::Double}, {TowerType::Mortar, TowerType::MortarPlus}};
 
-        static constexpr int EMP_HANDLE_THRESH = 3;
+        static constexpr int EMP_HANDLE_THRESH = 5;
 
         static constexpr int EMP_SIM_ROUND = 30;
         static constexpr int EVA_SIM_ROUND = 7;
