@@ -61,6 +61,7 @@ class Util {
     static constexpr int ACCU_COST[8] = {0, 15, 45, 105, 225, 465, 945, 1905}; // “修完”第i个塔需要的钱数
     static constexpr int TOWER_REFUND[8] = {0, 12, 24, 48, 96, 192, 384, 768}; // 拆除第i个塔获得的返还 / 第i个塔所拥有的“数量价值”
     static constexpr int ACCU_REFUND[8] = {0, 12, 36, 84, 180, 372, 756, 1524}; // 拥有n个塔的累计固定资产
+    static constexpr int MOVE_COST[8] = {0, 3, 6, 12, 24, 48, 96, 192}; // “搬迁”第i个塔需要的钱数（不包括等级开销）
 
     static constexpr int UPGRADE_COST[3] = {0, LEVEL2_TOWER_UPGRADE_PRICE, LEVEL3_TOWER_UPGRADE_PRICE}; // 升级i级塔的开销
     static constexpr int LEVEL_REFUND[4] = {0, 0, UPGRADE_COST[1]*4/5, (UPGRADE_COST[1]+UPGRADE_COST[2])*4/5}; // i级塔的“等级价值”
@@ -175,14 +176,15 @@ struct Sim_result {
     int succ_ant; // 模拟过程中我方掉的血
     int ant_killed; // 被我方击杀的蚂蚁数
     int first_succ; // 模拟过程中我方第一次掉血的回合数（相对时间）
+    int danger_encounter; // “危险抵近”（即容易被套盾发起攻击）的蚂蚁数
 
     int dmg_dealt; // 模拟过程中对方掉的血
     int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
 
-    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1) {}
+    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), danger_encounter(99), dmg_dealt(0), dmg_time(MAX_ROUND + 1) {}
 
-    constexpr Sim_result(int _succ, int _kill, int _first, int _dmg, int _dmg_time)
-    : succ_ant(_succ), ant_killed(_kill), first_succ(_first), dmg_dealt(_dmg), dmg_time(_dmg_time) {}
+    constexpr Sim_result(int _succ, int _kill, int _first, int _enc, int _dmg, int _dmg_time)
+    : succ_ant(_succ), ant_killed(_kill), first_succ(_first), danger_encounter(_enc), dmg_dealt(_dmg), dmg_time(_dmg_time) {}
 
 };
 /**
@@ -201,9 +203,11 @@ class Ant_simulator {
             int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
             int first_succ = MAX_ROUND + 1;
             int dmg_time = MAX_ROUND + 1;
+            std::vector<int> enc_ant_id;
+
             Simulator s(sim_info);
 
-            for (int i = 0; i < 2; i++) std::sort(ops[i].begin(), ops[i].end(), Ant_simulator::__cmp_downgrade_last);
+            for (int i = 0; i < 2; i++) std::sort(ops[i].begin(), ops[i].end(), Ant_simulator::__cmp_downgrade_last); // 将降级操作排到最后(因为操作从最后开始加)
 
             int _r = 0;
             for (; _r < round; ++_r) {
@@ -230,19 +234,26 @@ class Ant_simulator {
                     // Apply player0's operation
                     s.apply_operations_of_player(0);
                 }
+                if (first_succ > MAX_ROUND) for (const Ant& a : s.get_info().ants) {
+                    if (a.player == pid || distance(a.x, a.y, Base::POSITION[pid][0], Base::POSITION[pid][1]) > DANGER_RANGE) continue;
+                    if (!std::count(enc_ant_id.begin(), enc_ant_id.end(), a.id)) enc_ant_id.push_back(a.id);
+                }
                 if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
                 if (dmg_time > MAX_ROUND && INIT_HEALTH != s.get_info().bases[!pid].hp) dmg_time = _r;
             }
             // assert(s.get_info().round >= 512 || _r == round);
             for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
 
-            return Sim_result(base_damage[pid], s.ants_killed[pid], first_succ, base_damage[!pid], dmg_time);
+            return Sim_result(base_damage[pid], s.ants_killed[pid], first_succ, enc_ant_id.size(), base_damage[!pid], dmg_time);
         }
 
         GameInfo sim_info;
         std::vector<Scheduled_task> ops[2];
 
     private:
+
+        static constexpr int DANGER_RANGE = 3;
+        // 将降级操作排到最后(因为操作从最后开始加)
         static bool __cmp_downgrade_last(const Scheduled_task& a, const Scheduled_task& b) {
             return a.op.type != DowngradeTower && b.op.type == DowngradeTower;
         }
@@ -290,8 +301,13 @@ class Operation_list {
 
     std::string defence_str() const {
         std::string ret;
-        if (res.succ_ant) ret += str_wrap("[s: %2d, f: %3d, c: %3d] [", res.succ_ant, res.first_succ, cost);
-        else ret += str_wrap("[f: %3d, c: %3d] [", res.first_succ, cost);
+        int real_first_time = Operation_list::real_f_succ(res);
+
+        if (res.succ_ant) ret += str_wrap("[s: %2d, f: %3d", res.succ_ant, res.first_succ);
+        else ret += str_wrap("[f: %3d", res.first_succ);
+        if (real_first_time != res.first_succ) ret += str_wrap("(%d)", real_first_time);
+        ret += str_wrap(", c: %3d] [", cost);
+
         for (const Scheduled_task& task : ops) ret += task.op.str() + ' ';
         if (ops.size()) ret.pop_back();
         return ret + ']';
@@ -302,6 +318,11 @@ class Operation_list {
         if (ops.size()) ret.pop_back();
         return ret + ']';
     }
+
+    static int real_f_succ(const Sim_result& res) {
+        if (res.first_succ <= 40) return res.first_succ;
+        return 40 + (res.first_succ - 40) / (res.danger_encounter + 1);
+    }
     /**
      * @brief 比较当前行动序列与另一行动序列在“防守”方面的表现
      * 
@@ -309,7 +330,7 @@ class Operation_list {
      * @return bool 当前行动序列在“防守”方面是否优于other
      */
     bool operator>(const Operation_list& other) const {
-        if (res.first_succ != other.res.first_succ) return res.first_succ > other.res.first_succ;
+        if (Operation_list::real_f_succ(res) != Operation_list::real_f_succ(other.res)) return Operation_list::real_f_succ(res) > Operation_list::real_f_succ(other.res);
         return cost - res.ant_killed * 5 + res.succ_ant * 20 < other.cost - other.res.ant_killed * 5 + other.res.succ_ant * 20;
     }
     /**
@@ -467,7 +488,7 @@ class AI_ {
             ai_simulation_checker_pos(game_info);
 
             // 操作重排序
-            std::sort(ops.begin(), ops.end(), [](const Operation& a, const Operation& b){return a.type != DowngradeTower && b.type == DowngradeTower;});
+            std::sort(ops.begin(), ops.end(), [](const Operation& a, const Operation& b){return a.type == DowngradeTower && b.type != DowngradeTower;});
 
             return ops;
         }
@@ -581,7 +602,7 @@ class AI_ {
                             if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && !emp_active) continue;
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
-                            Operation_list opl_lv1({build_op}, sim_round, build_cost * UPGRADE_COST_MULT);
+                            Operation_list opl_lv1({build_op}, sim_round, build_cost);
                             logger.err("bud:  " + opl_lv1.defence_str());
                             if (opl_lv1 > best_result) best_result = opl_lv1;
 
@@ -648,27 +669,36 @@ class AI_ {
                     }
 
                     // 搜索：搬迁
-                    build_cost = game_info.build_tower_cost(tower_num - 1) / 5; // 真实消耗：0.2倍塔造价
-                    if (build_cost <= avail_money) {
-                        for (const Tower& t : game_info.towers) {
-                            if (t.player != pid || game_info.upgrade_tower_cost(t.type) != -1 || game_info.is_shielded_by_emp(t)) continue; // 被拆塔必然是1级的
-                            Operation destroy_op(DowngradeTower, t.id);
-                            if (logger.warn_if(!game_info.is_operation_valid(pid, destroy_op), "invalid destruct attempt")) continue;
+                    for (const Tower& t : game_info.towers) {
+                        int tower_level = Util::tower_level(t);
+                        if (t.player != pid || tower_level == 3 || game_info.is_shielded_by_emp(t)) continue; // 被拆塔必然是1或2级的
 
-                            for (const Pos& pos : feasible_hl[pid]) {
-                                const Operation& build_op = Util::build_op(pos);
-                                if (Util::closest_tower_dis(pos, t.id) < MIN_TOWER_DIST && !emp_active) continue;
-                                if (!game_info.is_operation_valid(pid, build_op)) continue;
+                        // 检验钱数
+                        int build_cost = Util::MOVE_COST[tower_num] + (tower_level == 2 ? 12 : 0);
+                        if (build_cost > avail_money) continue;
 
-                                Operation_list opl({destroy_op, build_op}, sim_round, build_cost);
-                                logger.err("mov: " + opl.defence_str());
-                                if (opl > best_result) best_result = opl;
-                            }
+                        // 构造拆除动作序列
+                        Operation_list opl_destroy({Operation(DowngradeTower, t.id)});
+                        if (tower_level == 2) opl_destroy.append(Operation(DowngradeTower, t.id), 1);
+
+                        for (const Pos& pos : feasible_hl[pid]) {
+                            const Operation& build_op = Util::build_op(pos);
+                            if (Util::closest_tower_dis(pos, t.id) < MIN_TOWER_DIST && !emp_active) continue;
+                            if (!game_info.is_operation_valid(pid, build_op)) continue;
+
+                            Operation_list opl(opl_destroy);
+                            opl.append(build_op, 2);
+                            if (tower_level == 2) opl.append(Util::upgrade_op(game_info.next_tower_id, t.type), 3); // 这里也有id的抢占问题
+                            opl.cost = build_cost;
+
+                            opl.evaluate(sim_round);
+                            logger.err("mov: " + opl.defence_str());
+                            if (opl > best_result) best_result = opl;
                         }
                     }
                     // 紧急处理：EMP
                     constexpr SuperWeaponType LS = SuperWeaponType::LightningStorm;
-                    if (raw_f_succ <= EMP_HANDLE_THRESH && emp_active && game_info.super_weapon_cd[pid][LS] <= 0) {
+                    if ((raw_f_succ <= EMP_HANDLE_THRESH || warn_streak > 5) && emp_active && game_info.super_weapon_cd[pid][LS] <= 0) {
                         if (SUPER_WEAPON_INFO[LS][3] <= avail_money) {
                             Operation_list opl({Util::lightning_op(LIGHTNING_POS[pid])}, sim_round, SUPER_WEAPON_INFO[LS][3] * LIGHTNING_MULT);
                             logger.err("LS:    " + opl.defence_str());
@@ -690,7 +720,8 @@ class AI_ {
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
                     logger.err("best: " + best_result.defence_str());
-                    for (const Scheduled_task& task : best_result.ops) {
+                    if (best_result.res.first_succ <= raw_f_succ + 10 && best_result.cost >= 10 * (best_result.res.first_succ - raw_f_succ)) logger.err("[Result not taken]");
+                    else for (const Scheduled_task& task : best_result.ops) {
                         if (task.round == 0) {
                             ops.push_back(task.op);
                             avail_money += game_info.get_operation_income(pid, task.op);
@@ -718,7 +749,8 @@ class AI_ {
                     opl.cost = opl.res.dmg_time;
 
                     if (opl.attack_better_than(best_EVA)) best_EVA = opl;
-                    if (opl.res.dmg_dealt > EVA_raw.res.dmg_dealt) logger.err("Potential EVA %s", opl.attack_str().c_str());
+                    if (opl.res.dmg_dealt > EVA_raw.res.dmg_dealt && (opl.res.dmg_time <= 3 || (opl.res.dmg_dealt >= opl.res.dmg_time - 2)))
+                        logger.err("Potential EVA %s", opl.attack_str().c_str());
                 }
                 if (game_info.super_weapon_cd[pid][DFL] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
@@ -731,12 +763,12 @@ class AI_ {
                     if (opl.res.dmg_dealt > DFL_raw.res.dmg_dealt) logger.err("Potential DFL %s", opl.attack_str().c_str());
                 }
 
-                if (game_info.super_weapon_cd[pid][EVA] <= 0) if (best_EVA.res.dmg_dealt && best_EVA.res.dmg_time == 0 && !attacking) {
-                    logger.err("Conduct EVA attack " + best_EVA.attack_str());
-                    ops.push_back(best_EVA.ops.front().op);
-                    avail_money -= SUPER_WEAPON_INFO[EVA][3];
-                    attacking = true;
-                }
+                // if (game_info.super_weapon_cd[pid][EVA] <= 0) if (best_EVA.res.dmg_dealt && best_EVA.res.dmg_time == 0 && !attacking) {
+                //     logger.err("Conduct EVA attack " + best_EVA.attack_str());
+                //     ops.push_back(best_EVA.ops.front().op);
+                //     avail_money -= SUPER_WEAPON_INFO[EVA][3];
+                //     attacking = true;
+                // }
             }
 
             // 进攻搜索：EMP
@@ -745,28 +777,28 @@ class AI_ {
             constexpr SuperWeaponType EB = SuperWeaponType::EmpBlaster;
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
             bool economy_advantage = avail_money + tower_value[pid] - avail_value[!pid] >= 200;
-            if (raw_f_succ >= 40 && avail_money >= 300 && game_info.super_weapon_cd[pid][EB] <= 0 && (game_info.coins[!pid] <= 135 || economy_advantage || !op_ls_ready)) {
+            if (raw_f_succ >= 40 && avail_money >= 300 && game_info.super_weapon_cd[pid][EB] <= 0) {
                 for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
                     if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
 
                     int banned_money = Util::EMP_banned_money(p, !pid);
-                    bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
-                    if (op_enough_cash && op_ls_ready) continue;
-                    Operation_list opl({Util::EMP_op(p)}, EMP_SIM_ROUND, -banned_money);
+                    // bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
+                    // if (op_enough_cash && op_ls_ready) continue;
+                    Operation_list opl({Util::EMP_op(p)}, EMP_SIM_ROUND, -banned_money+distance(x, y, Base::POSITION[!pid][0], Base::POSITION[!pid][1]));
 
                     if (opl.attack_better_than(best_EMP)) best_EMP = opl;
-                    if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2)
+                    if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2 && opl.res.dmg_time <= 10)
                         logger.err("atk: Ban:%d/%2d %s", Util::EMP_tower_count(p, !pid), banned_money, opl.attack_str().c_str());
                 }
                 logger.err("best_atk: " + best_EMP.attack_str());
 
-                if (best_EMP.res.dmg_dealt >= 4 && !attacking) {
-                    logger.err("Conduct EMP attack " + best_EMP.attack_str());
-                    ops.push_back(best_EMP.ops.front().op);
-                    avail_money -= SUPER_WEAPON_INFO[EB][3];
-                    attacking = true;
-                }
+                // if (best_EMP.res.dmg_dealt >= 4 && !attacking) {
+                //     logger.err("Conduct EMP attack " + best_EMP.attack_str());
+                //     ops.push_back(best_EMP.ops.front().op);
+                //     avail_money -= SUPER_WEAPON_INFO[EB][3];
+                //     attacking = true;
+                // }
             }
         }
     
@@ -800,8 +832,8 @@ class AI_ {
         static constexpr int EMP_HANDLE_THRESH = 3;
 
         static constexpr int EMP_SIM_ROUND = 30;
-        static constexpr int EVA_SIM_ROUND = 2;
-        static constexpr int DFL_SIM_ROUND = 3;
+        static constexpr int EVA_SIM_ROUND = 7;
+        static constexpr int DFL_SIM_ROUND = 10;
 };
 
 
