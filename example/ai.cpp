@@ -20,6 +20,7 @@ int banned_tower_count[2]; // 双方因EMP被冻结的塔数
 int banned_tower_value[2]; // 双方因EMP而不可用的固定资产
 
 int warn_streak; // 连续处于“响应状态”的回合数
+int EVA_emergency; // 因对手释放EVA而进入紧急情况的剩余回合数
 
 const GameInfo* info; // info的一份拷贝，用于Util等地
 
@@ -336,7 +337,11 @@ class Operation_list {
     }
     std::string attack_str() const {
         std::string ret = str_wrap("[dmg: %d, f: %2d, l: %3d] [", res.dmg_dealt, res.dmg_time, loss);
-        for (const Scheduled_task& task : ops) ret += task.op.str() + ' ';
+        for (const Scheduled_task& task : ops) {
+            ret += task.op.str();
+            if (task.round) ret += str_wrap("(+%d)", task.round);
+            ret.push_back(' ');
+        }
         if (ops.size()) ret.pop_back();
         return ret + ']';
     }
@@ -363,7 +368,9 @@ class Operation_list {
      * @return bool 当前行动序列在“进攻”方面是否优于other
      */
     bool attack_better_than(const Operation_list& other) const {
-        if (res.dmg_dealt != other.res.dmg_dealt) return res.dmg_dealt > other.res.dmg_dealt;
+        int s_score = res.dmg_dealt - res.dmg_time + (res.dmg_time <= 4);
+        int o_score = other.res.dmg_dealt - other.res.dmg_time + (res.dmg_time <= 4);
+        if (s_score != o_score) return s_score > o_score;
         return loss < other.loss;
     }
 };
@@ -471,6 +478,8 @@ class AI_ {
             ops.clear();
             logger.config(game_info.round);
             avail_money = game_info.coins[player_id];
+            if (!std::any_of(opponent_op.begin(), opponent_op.end(), [](const Operation& op){return op.type == UseEmergencyEvasion;})) EVA_emergency--;
+            else EVA_emergency = std::max(EVA_emergency, EVA_EMERGENCY_ROUND);
 
             // 经济信息统计
             for (int i = 0; i < 2; i++) {
@@ -606,13 +615,14 @@ class AI_ {
             if (game_info.round >= 12) {
                 Operation_list best_result(raw_result);
 
-                bool EMP_prevent = avail_money < 175 && game_info.round <= 200;
+                bool EMP_prevent = avail_money < 185 && game_info.round <= 220;
                 bool EMP_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                     [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::EmpBlaster;});
-                bool dfl_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
+                bool DFL_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                     [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::Deflector;});
                 bool aware_status = raw_f_succ < 20;
-                bool warning_status = EMP_active || dfl_active || raw_f_succ <= 10;
+                bool warning_status = EMP_active || DFL_active || EVA_emergency > 0 || raw_f_succ <= 10;
+                bool critical_status = EMP_active || DFL_active || raw_f_succ <= 6;
 
                 std::string situation_log("raw: " + best_result.defence_str());
                 if (aware_status) {
@@ -620,6 +630,7 @@ class AI_ {
                     warning_status |= (warn_streak > 5);
                     situation_log += str_wrap(", streak: %d", warn_streak);
                 } else warn_streak = 0;
+                if (EVA_emergency > 0) situation_log += str_wrap(", EVA_emer: %d", EVA_emergency);
                 logger.err(situation_log);
 
                 if (aware_status) { // 如果啥事不干基地会扣血
@@ -633,8 +644,8 @@ class AI_ {
                             if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
 
                             down_level = Util::tower_level(t_down);
-                            if ((down_level == 2 && tower_num < 3) && !warning_status) continue; // 非紧急情况下，仅在有4塔时允许降级2级塔
-                            if (down_level == 3 && !EMP_active) continue; // 非EMP情况下，不允许降级3级塔
+                            bool banned_lv3 = (down_level == 3) && (t_down.type == TowerType::Double || t_down.type == TowerType::MortarPlus);
+                            if (banned_lv3 && !warning_status) continue; // 非紧急情况下，不允许降级主力3级塔
 
                             down_op = Operation(DowngradeTower, t_down.id);
                             if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
@@ -647,11 +658,11 @@ class AI_ {
                         if (build_cost <= avail_money && build_cost < 240) { // 暂时写死不允许建5号塔
                             for (const Pos& pos : feasible_hl[pid]) {
                                 const Operation& build_op = Util::build_op(pos);
-                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && !EMP_active) continue;
+                                if (Util::closest_tower_dis(pos) < MIN_TOWER_DIST && !critical_status) continue;
                                 if (EMP_prevent && Util::closest_tower_dis(pos, down_level == 1 ? down_op.value().arg0 : -1) < MIN_TOWER_DIST_EARLY && !warning_status) continue;
                                 if (!game_info.is_operation_valid(pid, build_op)) continue;
 
-                                Operation_list opl_lv1({build_op}, -1, game_info.build_tower_cost(tower_num), build_cost);
+                                Operation_list opl_lv1({build_op}, -1, game_info.build_tower_cost(tower_num) + downgrade_income, build_cost);
                                 if (EMP_prevent && Util::EMP_can_cover(pos)) opl_lv1.max_f_succ = EMP_COVER_PENALTY;
                                 opl_lv1.append(down_op);
 
@@ -660,7 +671,7 @@ class AI_ {
                                 if (opl_lv1 > best_result) best_result = opl_lv1;
 
                                 // 升级
-                                if (avail_money < build_cost + Util::UPGRADE_COST[1]) continue; // 【其实很难讲塔的id会不会被别人抢先占用了】
+                                if (avail_money < build_cost + Util::UPGRADE_COST[1]) continue; // 有id抢占问题，但通常无伤大雅
                                 for (const TowerType* const upd_path : BUILD_SERIES) {
                                     if (upd_path[0] == TowerType::Heavy && !warning_status) continue; // HEAVY->CANNON路线仅限紧急情况
                                     if (upd_path[0] == TowerType::Quick && upd_path[1] == TowerType::QuickPlus && !warning_status) continue; // QUICK+路线仅限紧急情况
@@ -697,8 +708,7 @@ class AI_ {
 
                             int down_level = Util::tower_level(t_down);
                             bool banned_lv3 = (down_level == 3) && (t_down.type == TowerType::Double || t_down.type == TowerType::MortarPlus);
-                            if ((down_level == 2 && tower_num < 3) && !warning_status) continue; // 非紧急情况下，仅在有4塔时允许降级2级塔
-                            if (banned_lv3 && !EMP_active) continue; // 非EMP情况下，不允许降级3级塔
+                            if (banned_lv3 && !warning_status) continue; // 非紧急情况下，不允许降级某些主力3级塔
 
                             down_op = Operation(DowngradeTower, t_down.id);
                             if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
@@ -707,19 +717,23 @@ class AI_ {
                         } // 否则不降级
 
                         for (const Tower& t_up : game_info.towers) {
-                            if (t_up.player != pid || (down_op.has_value() && down_op.value().arg0 == t_up.id) || game_info.is_shielded_by_emp(t_up)) continue; // 游戏规则
+                            if (t_up.player != pid || game_info.is_shielded_by_emp(t_up)) continue; // 游戏规则
+
+                            bool path_changing = down_op.has_value() && down_op.value().arg0 == t_up.id && Util::tower_level(t_up) != 1;
+                            if (down_op.has_value() && down_op.value().arg0 == t_up.id && !path_changing) continue; // 现在允许切换路线了
 
                             int tower_level = Util::tower_level(t_up);
-                            int total_cost = Util::UPGRADE_COST[tower_level] - downgrade_income;
+                            int total_cost = Util::UPGRADE_COST[tower_level-path_changing] - downgrade_income;
                             if (tower_level == 3 || total_cost > avail_money) continue;
 
                             for (const TowerType* const upd_path : UPDATE_SERIES) {
-                                const Operation& upgrade_op = Util::upgrade_op(t_up, upd_path[tower_level-1]);
-                                if (upd_path[tower_level-1] / 10 != t_up.type) continue; // 升级路线不匹配
+                                const Operation& upgrade_op = Util::upgrade_op(t_up, upd_path[tower_level-1-path_changing]);
+                                if (upd_path[tower_level-1-path_changing] / 10 != t_up.type) continue; // 升级路线不匹配
                                 if (logger.warn_if(!game_info.is_operation_valid(pid, upgrade_op), "invalid upgrade attempt")) continue;
 
-                                Operation_list opl({upgrade_op}, -1, total_cost * UPGRADE_COST_MULT, total_cost); // 为升级提供优惠
+                                Operation_list opl({}, -1, Util::UPGRADE_COST[tower_level-path_changing] * UPGRADE_COST_MULT + downgrade_income, total_cost); // 为升级提供优惠
                                 opl.append(down_op);
+                                opl.append(upgrade_op, path_changing);
                                 opl.evaluate(sim_round);
                                 logger.err("upd: " + opl.defence_str());
                                 if (opl > best_result) best_result = opl;
@@ -743,7 +757,7 @@ class AI_ {
 
                         for (const Pos& pos : feasible_hl[pid]) {
                             const Operation& build_op = Util::build_op(pos);
-                            if (Util::closest_tower_dis(pos, t.id) < MIN_TOWER_DIST && !EMP_active) continue;
+                            if (Util::closest_tower_dis(pos, t.id) < MIN_TOWER_DIST && !critical_status) continue;
                             if (!game_info.is_operation_valid(pid, build_op)) continue;
 
                             Operation_list opl(opl_destroy);
@@ -856,14 +870,26 @@ class AI_ {
                     if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2 && opl.res.dmg_time <= 10)
                         logger.err("atk: Ban:%d/%2d %s", Util::EMP_tower_count(p, !pid), banned_money, opl.attack_str().c_str());
                 }
-                logger.err("best_atk: " + best_EMP.attack_str());
+                logger.err("raw best_EMP: " + best_EMP.attack_str());
 
-                // if (best_EMP.res.dmg_dealt >= 4 && !attacking) {
-                //     logger.err("Conduct EMP attack " + best_EMP.attack_str());
-                //     ops.push_back(best_EMP.ops.front().op);
-                //     avail_money -= SUPER_WEAPON_INFO[EB][3];
-                //     attacking = true;
-                // }
+                if (best_EMP.res.dmg_dealt >= 3 && best_EMP.res.dmg_dealt >= best_EMP.res.dmg_time - 2 && !attacking) {
+                    logger.err("EMP refining:");
+                    bool local_best = true;
+                    Operation_list best_refine(best_EMP);
+                    for (int i = 1; i <= EMP_REFINE_ROUND && local_best; i++) {
+                        best_refine.ops.front().round = i;
+                        best_refine.evaluate(EMP_SIM_ROUND);
+                        logger.err("EMP refine: %s", best_refine.attack_str().c_str());
+                        if (best_refine.attack_better_than(best_EMP)) local_best = false;
+                    }
+
+                    if (local_best) {
+                        logger.err("Conduct EMP attack " + best_EMP.attack_str());
+                        ops.push_back(best_EMP.ops.front().op);
+                        avail_money -= SUPER_WEAPON_INFO[EB][3];
+                        attacking = true;
+                    }
+                }
             }
         }
     
@@ -898,8 +924,11 @@ class AI_ {
         static constexpr TowerType UPDATE_SERIES[][2] = {{TowerType::Quick, TowerType::Double}, {TowerType::Mortar, TowerType::MortarPlus}};
 
         static constexpr int EMP_HANDLE_THRESH = 5;
+        static constexpr int EVA_EMERGENCY_ROUND = 10;
 
         static constexpr int EMP_SIM_ROUND = 30;
+        static constexpr int EMP_REFINE_ROUND = 5;
+
         static constexpr int EVA_SIM_ROUND = 7;
         static constexpr int DFL_SIM_ROUND = 10;
 };
