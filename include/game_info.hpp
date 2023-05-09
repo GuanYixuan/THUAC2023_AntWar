@@ -18,7 +18,6 @@
 #include <fstream>
 #include <iomanip>
 #include "common.hpp"
-#include "optional.hpp"
 
 /**
  * @brief A module used for game state management, providing interfaces for accessing and modifying 
@@ -38,9 +37,11 @@ struct GameInfo
     int next_ant_id;                                ///< ID of the next generated ant.
     int next_tower_id;                              ///< ID of the next built tower.
 
+    unsigned long long seed;
+
     GameInfo(unsigned long long seed)
         : round(0), bases{Base(0), Base(1)}, coins{COIN_INIT, COIN_INIT},
-          super_weapon_cd{}, next_ant_id(0), next_tower_id(0)
+          super_weapon_cd{}, next_ant_id(0), next_tower_id(0), seed(seed)
     {
         // Initialize pheromone
         Random random(seed);
@@ -59,13 +60,13 @@ struct GameInfo
      * @return An optional object whose value satisfies "pred" or nullopt if not found. 
      */
     template<typename T, typename Pred>
-    optional<T> find_one(const std::vector<T>& v, Pred pred) const
+    std::optional<T> find_one(const std::vector<T>& v, Pred pred) const
     {
         auto it = std::find_if(v.begin(), v.end(), pred);
         if (it != v.end())
-            return make_optional<T>(*it);
+            return std::make_optional<T>(*it);
         else
-            return nullopt;
+            return std::nullopt;
     }
     
     /**
@@ -112,7 +113,7 @@ struct GameInfo
      * @return An optional object whose value is the ant of the given ID or
      *         nullopt if not found.
      */
-    optional<Ant> ant_of_id(int id) const
+    std::optional<Ant> ant_of_id(int id) const
     {
         return find_one(ants, [id](const Ant &a) { return a.id == id; });
     }
@@ -150,7 +151,7 @@ struct GameInfo
      * @return An optional object whose value is the tower at the given point or
      *         nullopt if not found.
      */
-    optional<Tower> tower_at(int x, int y) const
+    std::optional<Tower> tower_at(int x, int y) const
     {
         return find_one(
             towers, [x, y](const Tower &t) { return t.x == x && t.y == y; });
@@ -162,7 +163,7 @@ struct GameInfo
      * @return An optional object whose value is the tower of the given ID or
      *         nullopt if not found.
      */
-    optional<Tower> tower_of_id(int id) const
+    std::optional<Tower> tower_of_id(int id) const
     {
         return find_one(
             towers, [id](const Tower &t) { return t.id == id; });

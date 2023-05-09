@@ -14,7 +14,8 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include "optional.hpp"
+#include <optional>
+#include <cassert>
 
 #include "logger.hpp"
 
@@ -24,29 +25,16 @@
 static constexpr int MAX_ROUND = 512;
 
 /* Map */
-
-/**
- * @brief A tag indicating the type of a building on the map.
- */
-enum class BuildingType
-{
-    Empty,
-    Tower,
-    Base
-};
-
 /**
  * @brief Length of one edge.
  * @note EDGE must be even.
  */
 static constexpr int EDGE = 10;
-
 /**
  * @brief Size of the map.
  * @note Point (x, y) with x < MAP_SIZE and y < MAP_SIZE may not be a valid position on the map.
  */
 static constexpr int MAP_SIZE = 2 * EDGE - 1;
-
 /**
  * @brief Tag indicating property of points.
  */
@@ -57,7 +45,6 @@ enum PointType {
     Player0Highland = 2, ///< Player0 can have buildings here
     Player1Highland = 3, ///< Player1 can have buildings here
 };
-
 /**
  * @brief Point types of the map.
  */
@@ -82,7 +69,6 @@ static constexpr int MAP_PROPERTY[MAP_SIZE][MAP_SIZE] = {
     {-1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1},
     {-1, -1, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 };
-
 /**
  * @brief The offsets between the coordinates of the current point and its surrounding 6 points.
  *
@@ -189,8 +175,34 @@ inline int get_direction(int x0, int y0, int x1, int y1)
     return -1;
 }
 
-/* Coin */
 
+struct Pos {
+    int x;
+    int y;
+
+    int dist_to(int x1, int x2) const {
+        return distance(x, y, x1, x2);
+    }
+    int dist_to(const Pos& other) const {
+        return distance(x, y, other.x, other.y);
+    }
+};
+const std::vector<Pos> highlands[2] = {
+    {
+        {6, 1}, {7, 1}, {4, 2}, {6, 2}, {8, 2}, {4, 3}, {5, 3}, {6, 4},
+        {8, 4}, {7, 5}, {5, 6}, {5, 7}, {6, 7}, {8, 7}, {7, 8}, {4, 9},
+        {5, 9}, {6, 9}, {7, 10}, {5, 11}, {6, 11}, {8, 11}, {5, 12}, {7, 13},
+        {6, 14}, {8, 14}, {4, 15}, {5, 15}, {4, 16}, {6, 16}, {8, 16}, {6, 17}, {7, 17}
+    }, {
+        {11, 1}, {12, 1}, {9, 2}, {11, 2}, {13, 2}, {13, 3}, {14, 3}, {9, 4},
+        {11, 4}, {11, 5}, {12, 6}, {10, 7}, {12, 7}, {13, 7}, {10, 8}, {12, 9},
+        {13, 9}, {14, 9}, {10, 10}, {10, 11}, {12, 11}, {13, 11}, {12, 12}, {11, 13},
+        {9, 14}, {11, 14}, {13, 15}, {14, 15}, {9, 16}, {11, 16}, {13, 16}, {11, 17}, {12, 17}
+    }
+};
+
+
+/* Coin */
 static constexpr int COIN_INIT = 50,
                      BASIC_INCOME = 1;
 static constexpr int TOWER_BUILD_PRICE_BASE = 15,
@@ -200,9 +212,16 @@ static constexpr int LEVEL2_TOWER_UPGRADE_PRICE = 60,
 static constexpr double TOWER_DOWNGRADE_REFUND_RATIO = 0.8;
 static constexpr int LEVEL2_BASE_UPGRADE_PRICE = 200,
                      LEVEL3_BASE_UPGRADE_PRICE = 250;
+static constexpr int BUILD_COST[8] = {0, 15, 30, 60, 120, 240, 480, 960}; // “修建”第i个塔需要的钱数
+static constexpr int ACCU_COST[8] = {0, 15, 45, 105, 225, 465, 945, 1905}; // “修完”第i个塔需要的钱数
+static constexpr int TOWER_REFUND[8] = {0, 12, 24, 48, 96, 192, 384, 768}; // 拆除第i个塔获得的返还 / 第i个塔所拥有的“数量价值”
+static constexpr int ACCU_REFUND[8] = {0, 12, 36, 84, 180, 372, 756, 1524}; // 拥有n个塔的累计固定资产
+static constexpr int MOVE_COST[8] = {0, 3, 6, 12, 24, 48, 96, 192}; // “搬迁”第i个塔需要的钱数（不包括等级开销）
+
+static constexpr int UPGRADE_COST[3] = {0, LEVEL2_TOWER_UPGRADE_PRICE, LEVEL3_TOWER_UPGRADE_PRICE}; // 升级i级塔的开销
+static constexpr int LEVEL_REFUND[4] = {0, 0, UPGRADE_COST[1]*4/5, (UPGRADE_COST[1]+UPGRADE_COST[2])*4/5}; // i级塔的“等级价值”
 
 /* Pheromone */
-
 static constexpr double PHEROMONE_INIT = 10,
                         PHEROMONE_MIN = 0,
                         PHEROMONE_ATTENUATING_RATIO = 0.97;
@@ -320,15 +339,11 @@ struct Ant
     }
 };
 
-constexpr int Ant::MAX_HP_INFO[];
-constexpr int Ant::REWARD_INFO[];
-
 /**
  * @brief Tag for the type of a tower. The integer values of these enumeration items
  * are also their indexes.
  */
-enum TowerType
-{
+enum TowerType {
     // Basic
     Basic = 0,
     // Heavy class
@@ -347,7 +362,38 @@ enum TowerType
     Pulse      = 32,
     Missile    = 33
 };
-
+inline const char* tower_type_name(TowerType tp) {
+    switch (tp) {
+        case TowerType::Basic:
+            return "Basic";
+        case TowerType::Heavy:
+            return "Heavy";
+        case TowerType::HeavyPlus:
+            return "Heavy+";
+        case TowerType::Ice:
+            return "Ice";
+        case TowerType::Cannon:
+            return "Cannon";
+        case TowerType::Quick:
+            return "Quick";
+        case TowerType::QuickPlus:
+            return "Quick+";
+        case TowerType::Double:
+            return "Double";
+        case TowerType::Sniper:
+            return "Sniper";
+        case TowerType::Mortar:
+            return "Mortar";
+        case TowerType::MortarPlus:
+            return "Mortar+";
+        case TowerType::Pulse:
+            return "Pulse";
+        case TowerType::Missile:
+            return "Missile";
+        default:
+            return "?";
+    }
+}
 /**
  * @brief Structure of static information of a type of towers.
  */
@@ -357,7 +403,6 @@ struct TowerInfo
     double speed; ///< Number of rounds required for an attack
     int range;    ///< Radius of searching range
 };
-
 /**
  * @brief Static information of all types of tower.
  */
@@ -379,10 +424,6 @@ constexpr TowerInfo TOWER_INFO[] = {
     {30, 3, 2}, // ID = 32 
     {45, 6, 5}  // ID = 33
 };
-
-/**
- * @brief Defense unit. Only choice to get yourself armed to the teeth.
- */
 struct Tower
 {
     int id, player;
@@ -403,10 +444,20 @@ struct Tower
         upgrade(type);
     }
 
+    /**
+     * @brief 计算给定塔的等级
+     * @return int 塔的等级(1~3)
+     */
+    int level() const {
+        if (type == TowerType::Basic) return 1;
+        if (type <= 10) return 2;
+        return 3;
+    }
+
     std::string str(bool bracket = false) const {
         std::string ans;
         if (bracket) ans += '[';
-        ans += str_wrap("p%d id%d tp%02d (%2d,%2d) cd%d", player, id, (int)type, x, y, cd);
+        ans += str_wrap("p%d id%d %s (%2d,%2d) cd%d", player, id, tower_type_name(type), x, y, cd);
         if (bracket) ans += ']';
         return ans;
     }
@@ -655,15 +706,15 @@ struct Base
      * @param round Birth round for the ant to be generated.
      * @return The ant if successfully generated, or nothing.
      */
-    optional<Ant> generate_ant(int id, int round)
+    std::optional<Ant> generate_ant(int id, int round)
     {
         return round % GENERATION_CYCLE_INFO[gen_speed_level] == 0
-            ? make_optional(Ant(
+            ? std::make_optional(Ant(
                 id, player, x, y,
                 Ant::MAX_HP_INFO[ant_level], ant_level,
                 0, AntState::Alive
             ))
-            : nullopt;
+            : std::nullopt;
     }
 
     /**
@@ -683,8 +734,6 @@ struct Base
     }
 };
 
-constexpr int Base::POSITION[2][2];
-constexpr int Base::GENERATION_CYCLE_INFO[];
 
 /**
  * @brief Tag for the type of a super weapon. The integer values of these enumeration items
@@ -698,7 +747,6 @@ enum SuperWeaponType
     EmergencyEvasion = 4,
     SuperWeaponCount
 };
-
 /**
  * @brief Static information of all types of super weapons.
  * @note [type]{duration, range, cd, price}
@@ -710,7 +758,8 @@ static constexpr int SUPER_WEAPON_INFO[5][4] = {
     {10, 3, 50, 100}, // Deflector
     {1, 3, 50, 100}   // Evasion
 };
-
+static constexpr int EVA_RANGE = SUPER_WEAPON_INFO[SuperWeaponType::EmergencyEvasion][1];
+static constexpr int EMP_RANGE = SUPER_WEAPON_INFO[SuperWeaponType::EmpBlaster][1];
 /**
  * @brief Great choice to knockout your opponent.
  */
@@ -774,7 +823,7 @@ struct Operation
      * @param arg0 (optional) The first argument.
      * @param arg1 (optional) The second argument.
      */
-    Operation(OperationType type, int arg0 = INVALID_ARG, int arg1 = INVALID_ARG)
+    constexpr Operation(OperationType type, int arg0 = INVALID_ARG, int arg1 = INVALID_ARG)
         : type(type), arg0(arg0), arg1(arg1) {}
 
     std::string wrap_pos() const {
@@ -788,7 +837,7 @@ struct Operation
             ans += "b" + wrap_pos();
             break;
         case UpgradeTower:
-            ans += str_wrap("%d^=%d", arg0, arg1);
+            ans += str_wrap("%d^=%s", arg0, tower_type_name((TowerType)arg1));
             break;
         case DowngradeTower:
             ans += str_wrap("!%d", arg0);
@@ -829,6 +878,27 @@ struct Operation
         return out;
     }
 };
+Operation build_op(const Pos& pos) {
+    return Operation(BuildTower, pos.x, pos.y);
+}
+Operation upgrade_op(const Tower& t, TowerType tp) {
+    return Operation(UpgradeTower, t.id, tp);
+}
+Operation upgrade_op(int tower_id, TowerType tp) {
+    return Operation(UpgradeTower, tower_id, tp);
+}
+Operation lightning_op(const Pos& pos) {
+    return Operation(UseLightningStorm, pos.x, pos.y);
+}
+Operation EMP_op(const Pos& pos) {
+    return Operation(UseEmpBlaster, pos.x, pos.y);
+}
+Operation DFL_op(const Pos& pos) {
+    return Operation(UseDeflector, pos.x, pos.y);
+}
+Operation EVA_op(const Pos& pos) {
+    return Operation(UseEmergencyEvasion, pos.x, pos.y);
+}
 
 /**
  * @brief Random noise generator.
