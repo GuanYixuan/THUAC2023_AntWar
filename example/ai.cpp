@@ -1,3 +1,5 @@
+#include "../include/control.hpp"
+
 #include "../include/simulate.hpp"
 #include "../include/logger.hpp"
 #include "../include/operation.hpp"
@@ -161,35 +163,35 @@ class Ant_simulator {
                     // Apply player1's operation
                     s.apply_operations_of_player(1);
                     // Next round
-                    if (s.next_round() != GameState::Running) break;
+                    if (!s.next_round()) break;
                 } else {
                     // Add player1's operation
                     __add_op(s, _r, 1);
                     // Apply player1's operation
                     s.apply_operations_of_player(1);
                     // Next round
-                    if (s.next_round() != GameState::Running) break;
+                    if (!s.next_round()) break;
                     // Add player0's operation
                     __add_op(s, _r, 0);
                     // Apply player0's operation
                     s.apply_operations_of_player(0);
                 }
-                if (first_succ > MAX_ROUND) for (const Ant& a : s.get_info().ants) {
+                if (first_succ > MAX_ROUND) for (const Ant& a : s.info.ants) {
                     if (a.player == pid || distance(a.x, a.y, Base::POSITION[pid][0], Base::POSITION[pid][1]) > DANGER_RANGE) continue;
                     if (!std::count(enc_ant_id.begin(), enc_ant_id.end(), a.id)) {
                         enc_ant_id.push_back(a.id);
                         if (enc_time > MAX_ROUND) enc_time = _r;
                     }
                 }
-                if (first_succ > MAX_ROUND && INIT_HEALTH != s.get_info().bases[pid].hp) first_succ = _r;
-                if (dmg_time > MAX_ROUND && INIT_HEALTH != s.get_info().bases[!pid].hp) dmg_time = _r;
+                if (first_succ > MAX_ROUND && INIT_HEALTH != s.info.bases[pid].hp) first_succ = _r;
+                if (dmg_time > MAX_ROUND && INIT_HEALTH != s.info.bases[!pid].hp) dmg_time = _r;
 
                 if (first_succ < max_f_succ) {
                     early_stop = true;
                     break;
                 }
             }
-            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.get_info().bases[i].hp;
+            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.info.bases[i].hp;
 
             return Sim_result(base_damage[pid], s.ants_killed[pid], first_succ, enc_ant_id.size(), enc_time, base_damage[!pid], dmg_time, early_stop);
         }
@@ -311,7 +313,7 @@ class AI_ {
             while (true) {
                 if (c.self_player_id == 0) { // Game process when you are player 0
                     // AI makes decisions
-                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.get_info(), _opponent_op);
+                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.info, _opponent_op);
                     // Add operations to controller
                     for (auto &op : ops) c.append_self_operation(op);
                     // Send operations to judger
@@ -324,7 +326,7 @@ class AI_ {
                     // Apply opponent operations to game state
                     c.apply_opponent_operations();
                     // Parallel Simulation
-                    Simulator fixer(c.get_info());
+                    Simulator fixer(c.info);
                     fixer.next_round();
                     // Read round info from judger
                     c.read_round_info();
@@ -338,7 +340,7 @@ class AI_ {
                     // Apply opponent operations to game state
                     c.apply_opponent_operations();
                     // AI makes decisions
-                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.get_info(), _opponent_op);
+                    std::vector<Operation> ops = ai_call_routine(c.self_player_id, c.info, _opponent_op);
                     // Add operations to controller
                     for (auto &op : ops) c.append_self_operation(op);
                     // Send operations to judger
@@ -346,7 +348,7 @@ class AI_ {
                     // Apply operations to game state
                     c.apply_self_operations();
                     // Parallel Simulation
-                    Simulator fixer(c.get_info());
+                    Simulator fixer(c.info);
                     fixer.next_round();
                     // Read round info from judger
                     c.read_round_info();
@@ -359,7 +361,7 @@ class AI_ {
         // 预处理模块：覆盖错误的Tower::cd
         void pre_fix_cd(const Simulator& fixer, GameInfo& incorrect) {
             bool id_same = true;
-            const std::vector<Tower>& correct_tower = fixer.get_info().towers;
+            const std::vector<Tower>& correct_tower = fixer.info.towers;
             std::vector<Tower>& editing_tower = incorrect.towers;
             assert(correct_tower.size() == editing_tower.size());
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) id_same &= (correct_tower[i].id == editing_tower[i].id);
@@ -376,7 +378,7 @@ class AI_ {
         // 预处理模块：覆盖错误的Ant::evasion
         void pre_fix_evasion(const Simulator& fixer, GameInfo& incorrect) {
             bool id_same = true;
-            const std::vector<Ant>& correct_ant = fixer.get_info().ants;
+            const std::vector<Ant>& correct_ant = fixer.info.ants;
             std::vector<Ant>& editing_ant = incorrect.ants;
             assert(correct_ant.size() == editing_ant.size());
             for (int i = 0, lim = correct_ant.size(); i < lim; i++) id_same &= (correct_ant[i].id == editing_ant[i].id);
@@ -492,7 +494,7 @@ class AI_ {
                 s.apply_operations_of_player(0);
             }
             pred = "";
-            for (const Ant& a : s.get_info().ants) pred += a.str(true);
+            for (const Ant& a : s.info.ants) pred += a.str(true);
 
             // 更新ants_killed的预测值
             for (int i = 0; i < 2; i++) ants_killed[i] += s.ants_killed[i];

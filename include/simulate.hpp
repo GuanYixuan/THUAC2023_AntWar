@@ -11,33 +11,36 @@
 #pragma once
 
 #include "game_info.hpp"
-#include "control.hpp"
-
-/**
- * @brief Enumerate values showing whether the game is running, and with detailed reasons
- * if the game ends.
- */
-enum GameState
-{
-    Player0Win, ///< Game ends when player 0 wins the game.
-    Player1Win, ///< Game ends when player 1 wins the game.
-    Running,    ///< Game is still running.
-    Undecided   ///< Game ends due to round limit exceeded. Further checking for the winner is needed.
-};
 
 /**
  * @brief An integrated module for simulation with simple interfaces for your convenience.
  * Built from the game state of a Controller instance, a Simulator object allows you to
  * simulate the whole game and "predict" the future for decision making.
  */
-class Simulator
-{
-private:
+class Simulator {
+public:
     GameInfo info;                          ///< Game state
     std::vector<Operation> operations[2];   ///< Players' operations which are about to be applied to current game state. 
 
-    /* Round settlement process */
+    bool verbose = 0;
+    int ants_killed[2] = {0, 0};
 
+    bool one_side = false;
+    int attack_side = -1;
+
+    /**
+     * @brief Construct a new Simulator object from a GameInfo instance. Current game state will be copied.
+     * @param info The GameInfo instance as data source.
+     */
+    Simulator(const GameInfo& info) : info(info) {}
+
+    void set_side(int side) {
+        one_side = true;
+        attack_side = side;
+    }
+
+private:
+    /* Round settlement process */
     /**
      * @brief Lightning storms snd towers try attacking ants.
      * 
@@ -49,18 +52,12 @@ private:
      * 
      * @see #AntState for more information on the life cycle of an ant.
      */
-    void attack_ants()
-    {
+    void attack_ants() {
         /* Lightning Storm Attack */
-
-        for (SuperWeapon& sw: info.super_weapons)
-        {
-            if(sw.type != SuperWeaponType::LightningStorm)
-                continue;
-            for (Ant &ant : info.ants)
-            {
-                if (sw.is_in_range(ant.x, ant.y) && ant.player != sw.player)
-                {
+        for (const SuperWeapon& sw: info.super_weapons) {
+            if(sw.type != SuperWeaponType::LightningStorm) continue;
+            for (Ant &ant : info.ants) {
+                if (sw.is_in_range(ant.x, ant.y) && ant.player != sw.player) {
                     ant.hp = 0;
                     ant.state = AntState::Fail;
                     info.update_coin(sw.player, ant.reward());
@@ -69,32 +66,23 @@ private:
         }
 
         /* Tower Attack */
-
         // Set deflector property
-        for (Ant& ant: info.ants)
-            ant.deflector = info.is_shielded_by_deflector(ant);
+        for (Ant& ant: info.ants) ant.deflector = info.is_shielded_by_deflector(ant);
         // Attack
-        for (Tower& tower: info.towers)
-        {
+        for (Tower& tower: info.towers) {
+            if (one_side && tower.player == attack_side) continue; // 不模拟进攻方的塔
             // Skip if shielded by EMP
-            if (info.is_shielded_by_emp(tower))
-                continue;
+            if (info.is_shielded_by_emp(tower)) continue;
             // Try to attack
             auto targets = tower.attack(info.ants, verbose);
             // Get coins if tower killed the target
-            for (int idx: targets)
-            {
-                if (info.ants[idx].state == AntState::Fail)
-                    info.update_coin(tower.player, info.ants[idx].reward());
-            }
+            for (int idx: targets) if (info.ants[idx].state == AntState::Fail) info.update_coin(tower.player, info.ants[idx].reward());
             // Reset tower's damage (clear buff effect)
             tower.damage = TOWER_INFO[tower.type].attack;
         }
         // Reset deflector property
-        for (Ant& ant: info.ants)
-            ant.deflector = false;
+        for (Ant& ant: info.ants) ant.deflector = false;
     }
-
     /**
      * @brief Make alive ants move according to pheromone, without modifying pheromone. 
      * 
@@ -105,109 +93,44 @@ private:
      * 
      * @see #AntState for more information on the life cycle of an ant.
      */
-    GameState move_ants()
-    {
-        for (Ant& ant: info.ants)
-        {
+    void move_ants() {
+        for (Ant& ant: info.ants) {
             // Update age regardless of the state
             ant.age++;
             // 1) No other action for dead ants
-            if (ant.state == AntState::Fail)
-                continue;
+            if (ant.state == AntState::Fail) continue;
             // 2) Check if too old
-            if (ant.age > Ant::AGE_LIMIT)
-                ant.state = AntState::TooOld;
+            if (ant.age > Ant::AGE_LIMIT) ant.state = AntState::TooOld;
             // 3) Move if possible (alive)
-            if (ant.state == AntState::Alive)
-                ant.move(info.next_move(ant));
+            if (ant.state == AntState::Alive) ant.move(info.next_move(ant));
             // 4) Check if success (Mark success even if it reaches the age limit)
-            if (ant.x == Base::POSITION[!ant.player][0] && ant.y == Base::POSITION[!ant.player][1])
-            {
+            if (ant.x == Base::POSITION[!ant.player][0] && ant.y == Base::POSITION[!ant.player][1]) {
                 ant.state = AntState::Success;
                 info.update_base_hp(!ant.player, -1);
                 info.update_coin(ant.player, 5);
-                // If hp of one side's base reaches 0, game over 
-                if (info.bases[!ant.player].hp <= 0)
-                    return (ant.player == 0) ? GameState::Player0Win : GameState::Player1Win;
+                // 不考虑基地血量降至0
             }
             // 5) Unfreeze if frozen
-            if (ant.state == AntState::Frozen)
-                ant.state = AntState::Alive;
+            if (ant.state == AntState::Frozen) ant.state = AntState::Alive;
         }
-        return GameState::Running;
     }
 
     /**
      * @brief Bases try generating new ants.
      * @note Generation may not happen if it is not the right time (i.e. round % cycle == 0).
      */
-    void generate_ants()
-    {
-        for (auto& base: info.bases)
-        {
+    void generate_ants() {
+        for (auto& base: info.bases) {
+            if (one_side && base.player != attack_side) continue; // 不为防守方生成蚂蚁
             auto ant = base.generate_ant(info.next_ant_id, info.round);
-            if (ant)
-            {
+            if (ant)  {
                 info.ants.push_back(std::move(ant.value()));
                 info.next_ant_id++;
             }
         }
     }
 
-    /**
-     * @brief Get the basic income for a player and add it to corresponding coins.
-     * @param player_id The player's ID.
-     */
-    void get_basic_income(int player_id)
-    {
-        info.update_coin(player_id, BASIC_INCOME);
-    }
-
-    /* Game judger */
-
-    /**
-     * @brief Judge winner at MAX_ROUND.
-     * @return Game result.
-     * @note The function returns GameState::Undecided when both players have the same hp.
-     */
-    GameState judge_winner() const
-    {
-        if (info.bases[0].hp < info.bases[1].hp)
-            return GameState::Player1Win;
-        else if (info.bases[0].hp > info.bases[1].hp)
-            return GameState::Player0Win;
-        else
-            return GameState::Undecided;
-    }
-
 public:
-    bool verbose = 0;
-    int ants_killed[2] = {0, 0};
-    /**
-     * @brief Construct a new Simulator object from a GameInfo instance. Current game state will be copied.
-     * @param info The GaemInfo instance as data source.
-     */
-    Simulator(const GameInfo& info) : info(info) {}
-
-    /**
-     * @brief Get information about current game state.
-     * @return A read-only (constant) reference to the current GameInfo object.
-     */
-    const GameInfo& get_info() const
-    {
-        return info;
-    }
-
-    /**
-     * @brief Get added operations of a player.
-     * @param player_id The player.
-     * @return A read-only (constant) reference to "operations[player_id]".
-     */
-    const std::vector<Operation>& get_operations_of_player(int player_id) const
-    {
-        return operations[player_id];
-    }
-
     /**
      *  @brief Try adding an operation to "operations[player_id]". The operation has been constructed elsewhere.
      *         This function will check validness of the operation and add it to "operations[player_id]" if valid.  
@@ -215,12 +138,10 @@ public:
      *  @param op The operation to be added.
      *  @return Whether the operation is added successfully.
      */
-    bool add_operation_of_player(int player_id, Operation op)
-    {
-        if (info.is_operation_valid(player_id, operations[player_id], op))
-        {
+    bool add_operation_of_player(int player_id, Operation op) {
+        if (info.is_operation_valid(player_id, operations[player_id], op)) {
             operations[player_id].push_back(op);
-        return true;
+            return true;
         }
         return false;
     }
@@ -229,42 +150,37 @@ public:
      * @brief Apply all operations in "operations[player_id]" to current state.
      * @param player_id The player.
      */
-    void apply_operations_of_player(int player_id)
-    {
+    void apply_operations_of_player(int player_id) {
         // 1) count down long-lasting weapons' left-time
         info.count_down_super_weapons_left_time(player_id);
         // 2) apply opponent's operations
-        for (auto& op: operations[player_id])
-            info.apply_operation(player_id, op);
+        for (auto& op: operations[player_id]) info.apply_operation(player_id, op);
     }
 
     /**
      * @brief Update game state at the end of current round.
      * This function is called after both players have applied their operations.
-     * @return Current game state (running / ended with some reasons).
+     * @return bool Whether the game is still running.
      */
-    GameState next_round()
-    {
+    bool next_round() {
         // 1) Judge winner at MAX_ROUND
-        if (info.round == MAX_ROUND)
-            return judge_winner();
+        if (info.round == MAX_ROUND) return false;
         // 2) Towers attack ants
         attack_ants();
         // 3) Ants move
-        GameState state = move_ants();
-        if (state != GameState::Running)
-            return state;
+        move_ants();
         // 4) Update pheromone
-        info.global_pheromone_attenuation();
-        info.update_pheromone_for_ants();
+        if (one_side) info.global_pheromone_attenuation(attack_side); // 仅模拟进攻方的信息素
+        else info.global_pheromone_attenuation();
+        info.update_pheromone_for_ants(); // 正常update信息素，因为防御方不会出蚂蚁
         // 5) Clear dead and succeeded ants
-        for (int i = 0; i < 2; i++) ants_killed[!i] = std::count_if(info.ants.begin(), info.ants.end(), [i](const Ant& ant){ return ant.state == AntState::Fail && ant.player == i; });
+        for (int i = 0; i < 2; i++) ants_killed[!i] = std::count_if(info.ants.begin(), info.ants.end(), [i](const Ant& a){ return a.state == AntState::Fail && a.player == i; });
         info.clear_dead_and_succeeded_ants();
         // 6) Barracks generate new ants
         generate_ants();
         // 7) Get basic income
-        get_basic_income(0);
-        get_basic_income(1);
+        info.coins[0] += BASIC_INCOME;
+        info.coins[1] += BASIC_INCOME;
         // 8) Start next round
         info.round++;
         // 9) Count down super weapons' cd
@@ -273,6 +189,6 @@ public:
         operations[0].clear();
         operations[1].clear();
 
-        return GameState::Running;
+        return true;
     }
 };

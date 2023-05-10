@@ -278,10 +278,8 @@ struct GameInfo
     /**
      * @brief Update pheromone for each ant.
      */
-    void update_pheromone_for_ants()
-    {
-        for (const Ant& ant : ants)
-            update_pheromone(ant);
+    void update_pheromone_for_ants() {
+        for (const Ant& ant : ants) update_pheromone(ant);
     }
 
     /**
@@ -294,8 +292,7 @@ struct GameInfo
         static constexpr double TAU[] = {0.0, 10.0, -5, -3};
         
         // Do nothing if the ant is alive or frozen
-        if (ant.state == AntState::Alive || ant.state == AntState::Frozen)
-            return;
+        if (ant.state == AntState::Alive || ant.state == AntState::Frozen) return;
         
         // Update pheromone from start to end
         int tau = TAU[ant.state];
@@ -331,14 +328,13 @@ struct GameInfo
     /**
      * @brief Global pheromone attenuation.
      */
-    void global_pheromone_attenuation()
-    {
-        for (int i = 0; i < 2; ++i)
-            for (int j = 0; j < MAP_SIZE; ++j)
-                for (int k = 0; k < MAP_SIZE; ++k)
-                    pheromone[i][j][k] =
-                        PHEROMONE_ATTENUATING_RATIO * pheromone[i][j][k]
-                        + (1 - PHEROMONE_ATTENUATING_RATIO) * PHEROMONE_INIT;
+    void global_pheromone_attenuation() {
+        for (int i = 0; i < 2; ++i) for (int j = 0; j < MAP_SIZE; ++j) for (int k = 0; k < MAP_SIZE; ++k)
+            pheromone[i][j][k] = PHEROMONE_ATTENUATING_RATIO * pheromone[i][j][k] + (1 - PHEROMONE_ATTENUATING_RATIO) * PHEROMONE_INIT;
+    }
+    void global_pheromone_attenuation(int player_id) {
+        for (int j = 0; j < MAP_SIZE; ++j) for (int k = 0; k < MAP_SIZE; ++k)
+            pheromone[player_id][j][k] = PHEROMONE_ATTENUATING_RATIO * pheromone[player_id][j][k] + (1 - PHEROMONE_ATTENUATING_RATIO) * PHEROMONE_INIT;
     }
 
     /* Operation checkers and appliers */
