@@ -106,133 +106,19 @@ class Util {
 };
 
 
-// 模拟结果类
-struct Sim_result {
-    int succ_ant; // 模拟过程中我方掉的血
-    int ant_killed; // 被我方击杀的蚂蚁数
-    int first_succ; // 模拟过程中我方第一次掉血的回合数（相对时间）
-    int danger_encounter; // “危险抵近”（即容易被套盾发起攻击）的蚂蚁数
-    int first_enc; // “第一次危险抵近”的回合数（相对时间）
-
-    int dmg_dealt; // 模拟过程中对方掉的血
-    int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
-
-    bool early_stop; // 这一模拟结果是否是提前停止而得出的
-
-    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), danger_encounter(99), first_enc(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1), early_stop(false) {}
-
-    constexpr Sim_result(int _succ, int _kill, int _first, int _enc, int _first_enc, int _dmg, int _dmg_time, bool _early)
-    : succ_ant(_succ), ant_killed(_kill), first_succ(_first), danger_encounter(_enc), first_enc(_first_enc), dmg_dealt(_dmg), dmg_time(_dmg_time), early_stop(_early) {}
-
-};
-/**
- * @brief 用于模拟ant行动的模拟器，模拟期间不会考虑两个玩家的任何操作
- * @note 仅限一次性使用
- */
-class Ant_simulator {
-    static constexpr int INIT_HEALTH = 49;
-
-    public:
-        Ant_simulator(const std::vector<Task>& my_task = {}) : sim_info(*info) {
-            ops[pid] = my_task;
-            for (int i = 0; i < 2; i++) sim_info.bases[i].hp = INIT_HEALTH;
-        }
-        Sim_result simulate(int round, int max_f_succ) {
-            int base_damage[2]; // 模拟结果：基地受到的伤害[player_id]
-            int first_succ = MAX_ROUND + 1;
-            int dmg_time = MAX_ROUND + 1;
-
-            int enc_time = MAX_ROUND + 1;
-            std::vector<int> enc_ant_id;
-
-            bool early_stop = false;
-
-            Simulator s(sim_info);
-
-            for (int i = 0; i < 2; i++) std::sort(ops[i].begin(), ops[i].end(), Ant_simulator::__cmp_downgrade_last); // 将降级操作排到最后(因为操作从最后开始加)
-
-            int _r = 0;
-            for (; _r < round; ++_r) {
-                if (pid == 0) {
-                    // Add player0's operation
-                    __add_op(s, _r, 0);
-                    // Apply player0's operation
-                    s.apply_operations_of_player(0);
-                    // Add player1's operation
-                    __add_op(s, _r, 1);
-                    // Apply player1's operation
-                    s.apply_operations_of_player(1);
-                    // Next round
-                    if (!s.next_round()) break;
-                } else {
-                    // Add player1's operation
-                    __add_op(s, _r, 1);
-                    // Apply player1's operation
-                    s.apply_operations_of_player(1);
-                    // Next round
-                    if (!s.next_round()) break;
-                    // Add player0's operation
-                    __add_op(s, _r, 0);
-                    // Apply player0's operation
-                    s.apply_operations_of_player(0);
-                }
-                if (first_succ > MAX_ROUND) for (const Ant& a : s.info.ants) {
-                    if (a.player == pid || distance(a.x, a.y, Base::POSITION[pid][0], Base::POSITION[pid][1]) > DANGER_RANGE) continue;
-                    if (!std::count(enc_ant_id.begin(), enc_ant_id.end(), a.id)) {
-                        enc_ant_id.push_back(a.id);
-                        if (enc_time > MAX_ROUND) enc_time = _r;
-                    }
-                }
-                if (first_succ > MAX_ROUND && INIT_HEALTH != s.info.bases[pid].hp) first_succ = _r;
-                if (dmg_time > MAX_ROUND && INIT_HEALTH != s.info.bases[!pid].hp) dmg_time = _r;
-
-                if (first_succ < max_f_succ) {
-                    early_stop = true;
-                    break;
-                }
-            }
-            for (int i = 0; i < 2; i++) base_damage[i] = INIT_HEALTH - s.info.bases[i].hp;
-
-            return Sim_result(base_damage[pid], s.ants_killed[pid], first_succ, enc_ant_id.size(), enc_time, base_damage[!pid], dmg_time, early_stop);
-        }
-
-        GameInfo sim_info;
-        std::vector<Task> ops[2];
-
-    private:
-        static constexpr int DANGER_RANGE = 4;
-        // 将降级操作排到最后(因为操作从最后开始加)
-        static bool __cmp_downgrade_last(const Task& a, const Task& b) {
-            return a.op.type != DowngradeTower && b.op.type == DowngradeTower;
-        }
-        void __add_op(Simulator& s, int _r, int player) {
-            std::vector<Task>& tasks = ops[player];
-            for (int i = tasks.size()-1; i >= 0; i--) {
-                const Task& curr_task = tasks[i];
-                if (curr_task.round == _r) {
-                    if (!s.add_operation_of_player(player, curr_task.op)) {
-                        fprintf(stderr, "[w] Adding invalid operation for player %d at sim round %d: %s\n", player, _r, curr_task.op.str(true).c_str());
-                    }
-                    tasks.erase(tasks.begin() + i);
-                }
-            }
-        }
-};
-
-/**
- * @brief 行动序列，同时包含模拟及比较功能
- * 
- */
+// 行动序列类，同时包含模拟及比较功能
 class Operation_list {
     public:
     std::vector<Task> ops;
     int loss; // 行动序列的“损失函数”，注意这往往不是真实花费
     int cost; // 行动序列的开销（指coin）
 
+    int atk_side;
     Sim_result res;
     int max_f_succ = 1e7;
 
-    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _loss = 0, int _cost = 0) : loss(_loss), cost(_cost) {
+    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _loss = 0, int _cost = 0, int _atk_side = -1)
+    : loss(_loss), cost(_cost), atk_side(_atk_side) {
         for (const Operation& op : _ops) append(op);
         if (eval_round >= 0) evaluate(eval_round);
     };
@@ -243,9 +129,10 @@ class Operation_list {
         if (op) append(op.value(), _round);
     }
 
-    const Sim_result& evaluate(int _round, int max_f_succ = 513) {
-        Ant_simulator sim(ops);
-        res = sim.simulate(_round, max_f_succ);
+    const Sim_result& evaluate(int _round, int stopping_f_succ = -1) {
+        Simulator sim(*info, pid, atk_side);
+        sim.task_list[pid] = ops;
+        res = sim.simulate(_round, stopping_f_succ);
         return res;
     }
 
@@ -326,7 +213,7 @@ class AI_ {
                     // Apply opponent operations to game state
                     c.apply_opponent_operations();
                     // Parallel Simulation
-                    Simulator fixer(c.info);
+                    Simulator fixer(c.info, pid);
                     fixer.next_round();
                     // Read round info from judger
                     c.read_round_info();
@@ -348,7 +235,7 @@ class AI_ {
                     // Apply operations to game state
                     c.apply_self_operations();
                     // Parallel Simulation
-                    Simulator fixer(c.info);
+                    Simulator fixer(c.info, pid);
                     fixer.next_round();
                     // Read round info from judger
                     c.read_round_info();
@@ -470,11 +357,11 @@ class AI_ {
         }
         // 模拟检查：检查Simulator对一回合后的预测结果是否与实测符合，同时预测Ants_killed
         void ai_simulation_checker_pos(const GameInfo &game_info) {
-            Simulator s(game_info);
+            Simulator s(game_info, pid);
             // s.verbose = 1;
             if (pid == 0) {
                 // Add player0's operation
-                for (auto &op : ops) s.add_operation_of_player(0, op);
+                for (const Operation& op : ops) s.operations[0].push_back(op);
                 // Apply player0's operation
                 s.apply_operations_of_player(0);
                 // Add player1's operation
@@ -484,7 +371,7 @@ class AI_ {
                 s.next_round();
             } else {
                 // Add player1's operation
-                for (auto &op : ops) s.add_operation_of_player(1, op);
+                for (const Operation& op : ops) s.operations[1].push_back(op);
                 // Apply player1's operation
                 s.apply_operations_of_player(1);
                 // Next round
@@ -588,7 +475,7 @@ class AI_ {
                                 if (EMP_prevent && Util::closest_tower_dis(pos, down_level == 1 ? down_op.value().arg0 : -1) < MIN_TOWER_DIST_EARLY && !warning_status) continue;
                                 if (!game_info.is_operation_valid(pid, bud_op)) continue;
 
-                                Operation_list opl_lv1({bud_op}, -1, game_info.build_tower_cost(tower_num) + downgrade_income, build_cost);
+                                Operation_list opl_lv1({bud_op}, -1, game_info.build_tower_cost(tower_num) + downgrade_income, build_cost, !pid);
                                 if (EMP_prevent && Util::EMP_can_cover(pos)) opl_lv1.max_f_succ = EMP_COVER_PENALTY;
                                 opl_lv1.append(down_op);
 
@@ -657,7 +544,7 @@ class AI_ {
                                 if (upd_path[tower_level-1-path_changing] / 10 != t_up.type) continue; // 升级路线不匹配
                                 if (logger.warn_if(!game_info.is_operation_valid(pid, upd_op), "invalid upgrade attempt")) continue;
 
-                                Operation_list opl({}, -1, UPGRADE_COST[tower_level-path_changing] * UPGRADE_COST_MULT + downgrade_income, total_cost); // 为升级提供优惠
+                                Operation_list opl({}, -1, UPGRADE_COST[tower_level-path_changing] * UPGRADE_COST_MULT + downgrade_income, total_cost, !pid); // 为升级提供优惠
                                 opl.append(down_op);
                                 opl.append(upd_op, path_changing);
                                 opl.evaluate(sim_round, best_result.res.first_succ);
@@ -688,6 +575,7 @@ class AI_ {
 
                             // 先搜索:搬成1级
                             Operation_list opl(opl_destroy);
+                            opl.atk_side = !pid;
                             opl.append(bud_op, 1);
                             opl.loss = opl.cost = build_cost - (tower_level == 2 ? 12 : 0);
                             if (EMP_prevent && Util::EMP_can_cover(pos, t.id)) opl.max_f_succ = EMP_COVER_PENALTY;
@@ -710,7 +598,7 @@ class AI_ {
                     constexpr int LS_cost = SUPER_WEAPON_INFO[LS][3];
                     if ((raw_f_succ <= EMP_HANDLE_THRESH || warn_streak > 4) && EMP_active && game_info.super_weapon_cd[pid][LS] <= 0) {
                         if (LS_cost <= avail_money) {
-                            Operation_list opl({lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT, LS_cost);
+                            Operation_list opl({lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT, LS_cost, !pid);
                             logger.err("LS:    " + opl.defence_str());
                             if (opl > best_result) best_result = opl;
                         } else {
@@ -721,7 +609,7 @@ class AI_ {
 
                                 int downgrade_income = game_info.get_operation_income(pid, down_op);
                                 if (downgrade_income + avail_money < SUPER_WEAPON_INFO[LS][3]) continue; // 钱不够
-                                Operation_list opl({down_op, lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT + downgrade_income, LS_cost);
+                                Operation_list opl({down_op, lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT + downgrade_income, LS_cost, !pid);
                                 logger.err("LS(-): " + opl.defence_str());
                                 if (opl > best_result) best_result = opl;
                             }
@@ -762,6 +650,7 @@ class AI_ {
                     if (MAP_PROPERTY[x][y] == -1 || !ant_count) continue;
 
                     Operation_list opl({EVA_op(p)}, EVA_SIM_ROUND, -ant_count);
+                    opl.atk_side = pid;
 
                     if (opl.attack_better_than(best_EVA)) best_EVA = opl;
                     if (opl.res.dmg_dealt > EVA_raw.res.dmg_dealt && (opl.res.dmg_time <= 3 || (opl.res.dmg_dealt >= opl.res.dmg_time - 2) || ant_count >= 3))
@@ -772,6 +661,7 @@ class AI_ {
                     if (MAP_PROPERTY[x][y] == -1) continue;
 
                     Operation_list opl({DFL_op(p)}, DFL_SIM_ROUND); // 暂时不知设什么cost好
+                    opl.atk_side = pid;
                     opl.loss = opl.res.dmg_time;
 
                     if (opl.attack_better_than(best_DFL)) best_DFL = opl;
@@ -803,6 +693,7 @@ class AI_ {
                     // bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
                     // if (op_enough_cash && op_ls_ready) continue;
                     Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -banned_money-Util::EMP_highland_count(p, !pid));
+                    opl.atk_side = pid;
 
                     if (opl.attack_better_than(best_EMP)) best_EMP = opl;
                     if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2 && opl.res.dmg_time <= 10)

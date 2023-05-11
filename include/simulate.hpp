@@ -1,45 +1,134 @@
-/**
- * @file simulate.hpp
- * @author Jingxuan Liu, Yufei li
- * @brief An integrated module for game simulation.
- * @date 2023-04-01
- * 
- * @copyright Copyright (c) 2023
- * 
- */
-
 #pragma once
 
 #include "game_info.hpp"
 
-/**
- * @brief An integrated module for simulation with simple interfaces for your convenience.
- * Built from the game state of a Controller instance, a Simulator object allows you to
- * simulate the whole game and "predict" the future for decision making.
- */
+// 模拟结果类
+struct Sim_result {
+    int succ_ant; // 模拟过程中我方掉的血
+    int ant_killed; // 被我方击杀的蚂蚁数
+    int first_succ; // 模拟过程中我方第一次掉血的回合数（相对时间）
+    int danger_encounter; // “危险抵近”（即容易被套盾发起攻击）的蚂蚁数
+    int first_enc; // “第一次危险抵近”的回合数（相对时间）
+
+    int dmg_dealt; // 模拟过程中对方掉的血
+    int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
+
+    bool early_stop; // 这一模拟结果是否是提前停止而得出的
+
+    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), danger_encounter(99), first_enc(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1), early_stop(false) {}
+};
+
+// 模拟器类
 class Simulator {
 public:
-    GameInfo info;                          ///< Game state
-    std::vector<Operation> operations[2];   ///< Players' operations which are about to be applied to current game state. 
+    const int pid;
+    GameInfo info;                          // Game state
+    std::vector<Operation> operations[2];   // Players' operations which are about to be applied to current game state.
+    std::vector<Task> task_list[2];
 
     bool verbose = 0;
     int ants_killed[2] = {0, 0};
 
-    bool one_side = false;
-    int attack_side = -1;
+    static constexpr int INIT_HEALTH = 49;
+    /**
+     * @brief 构造一个新的Simulator对象
+     * @param curr_info 初始局面，模拟将自此局面开始
+     * @param pid 模拟的“立场”，也即返回的Sim_result中的“我方”玩家编号
+     * @param atk_side 本次模拟所关注的“进攻方”，只有进攻方的蚂蚁以及“防守方”的塔会被模拟。默认为两方都模拟
+     */
+    explicit Simulator(const GameInfo& curr_info, int pid, int atk_side = -1) : info(curr_info), pid(pid) {
+        for (int i = 0; i < 2; i++) info.bases[i].hp = INIT_HEALTH;
+        if (atk_side != -1) set_side(atk_side);
+    }
 
     /**
-     * @brief Construct a new Simulator object from a GameInfo instance. Current game state will be copied.
-     * @param info The GameInfo instance as data source.
+     * @brief 进入“单边模拟模式”并设置“进攻方”，在“单边模拟模式”中，只有进攻方的蚂蚁以及“防守方”的塔会被模拟
+     * @param side 进攻方的编号
      */
-    Simulator(const GameInfo& info) : info(info) {}
-
     void set_side(int side) {
         one_side = true;
         attack_side = side;
+        for (auto it = info.ants.begin(); it != info.ants.end(); ) {
+            if (it->player != attack_side) it = info.ants.erase(it);
+            else ++it;
+        }
+    }
+
+    static constexpr int DANGER_RANGE = 4;
+    Sim_result simulate(int round, int stopping_f_succ) {
+        Sim_result res;
+        res.first_succ = res.dmg_time = res.first_enc = MAX_ROUND + 1;
+
+        std::vector<int> enc_ant_id;
+        for (int i = 0; i < 2; i++) std::sort(task_list[i].begin(), task_list[i].end(), __cmp_downgrade_last); // 将降级操作排到最后(因为操作从最后开始加)
+
+        for (int _r = 0; _r < round; ++_r) {
+            if (pid == 0) {
+                // Add player0's operation
+                __add_op(_r, 0);
+                // Apply player0's operation
+                apply_operations_of_player(0);
+                // Add player1's operation
+                __add_op(_r, 1);
+                // Apply player1's operation
+                apply_operations_of_player(1);
+                // Next round
+                if (!next_round()) break;
+            } else {
+                // Add player1's operation
+                __add_op(_r, 1);
+                // Apply player1's operation
+                apply_operations_of_player(1);
+                // Next round
+                if (!next_round()) break;
+                // Add player0's operation
+                __add_op(_r, 0);
+                // Apply player0's operation
+                apply_operations_of_player(0);
+            }
+            if (res.first_succ > MAX_ROUND) for (const Ant& a : info.ants) {
+                if (a.player == pid || distance(a.x, a.y, Base::POSITION[pid][0], Base::POSITION[pid][1]) > DANGER_RANGE) continue;
+                if (!std::count(enc_ant_id.begin(), enc_ant_id.end(), a.id)) {
+                    enc_ant_id.push_back(a.id);
+                    if (res.first_enc > MAX_ROUND) res.first_enc = _r;
+                }
+            }
+            if (res.first_succ > MAX_ROUND && INIT_HEALTH != info.bases[pid].hp) res.first_succ = _r;
+            if (res.dmg_time > MAX_ROUND && INIT_HEALTH != info.bases[!pid].hp) res.dmg_time = _r;
+
+            if (res.first_succ < stopping_f_succ) { // “挂了就停止”仍然可以考虑
+                res.early_stop = true;
+                break;
+            }
+        }
+
+        res.ant_killed = ants_killed[pid];
+        res.danger_encounter = enc_ant_id.size();
+        res.succ_ant = INIT_HEALTH - info.bases[pid].hp;
+        res.dmg_dealt = INIT_HEALTH - info.bases[!pid].hp;
+        return res;
     }
 
 private:
+    bool one_side = false;
+    int attack_side = -1;
+    // 将降级操作排到最后(因为操作从最后开始加)
+    static bool __cmp_downgrade_last(const Task& a, const Task& b) {
+        return a.op.type != DowngradeTower && b.op.type == DowngradeTower;
+    }
+    void __add_op(int _r, int player) {
+        std::vector<Task>& tasks = task_list[player];
+        for (int i = tasks.size()-1; i >= 0; i--) {
+            const Task& curr_task = tasks[i];
+            if (curr_task.round == _r) {
+                if (!info.is_operation_valid(player, operations[player], curr_task.op))
+                    fprintf(stderr, "[w] Adding invalid operation for player %d at sim round %d: %s\n", player, _r, curr_task.op.str(true).c_str());
+                else operations[player].push_back(curr_task.op);
+                tasks.erase(tasks.begin() + i);
+            }
+        }
+    }
+
     /* Round settlement process */
     /**
      * @brief Lightning storms snd towers try attacking ants.
@@ -131,21 +220,6 @@ private:
     }
 
 public:
-    /**
-     *  @brief Try adding an operation to "operations[player_id]". The operation has been constructed elsewhere.
-     *         This function will check validness of the operation and add it to "operations[player_id]" if valid.  
-     *  @param player_id The player.
-     *  @param op The operation to be added.
-     *  @return Whether the operation is added successfully.
-     */
-    bool add_operation_of_player(int player_id, Operation op) {
-        if (info.is_operation_valid(player_id, operations[player_id], op)) {
-            operations[player_id].push_back(op);
-            return true;
-        }
-        return false;
-    }
-
     /**
      * @brief Apply all operations in "operations[player_id]" to current state.
      * @param player_id The player.
