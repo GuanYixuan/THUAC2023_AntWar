@@ -105,89 +105,6 @@ class Util {
 
 };
 
-
-// 行动序列类，同时包含模拟及比较功能
-class Operation_list {
-    public:
-    std::vector<Task> ops;
-    int loss; // 行动序列的“损失函数”，注意这往往不是真实花费
-    int cost; // 行动序列的开销（指coin）
-
-    int atk_side;
-    Sim_result res;
-    int max_f_succ = 1e7;
-
-    explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _loss = 0, int _cost = 0, int _atk_side = -1)
-    : loss(_loss), cost(_cost), atk_side(_atk_side) {
-        for (const Operation& op : _ops) append(op);
-        if (eval_round >= 0) evaluate(eval_round);
-    };
-    void append(const Operation& op, int _round = 0) {
-        ops.emplace_back(op, _round);
-    }
-    void append(const std::optional<Operation>& op, int _round = 0) {
-        if (op) append(op.value(), _round);
-    }
-
-    const Sim_result& evaluate(int _round, int stopping_f_succ = -1) {
-        Simulator sim(*info, pid, atk_side);
-        sim.task_list[pid] = ops;
-        res = sim.simulate(_round, stopping_f_succ);
-        return res;
-    }
-
-    std::string defence_str() const {
-        std::string ret;
-        int real_first_time = real_f_succ();
-
-        ret += str_wrap("[s/enc: %d/%d, f/enc: %3d/%d", res.succ_ant, res.danger_encounter, res.first_succ, res.first_enc);
-        if (real_first_time != res.first_succ) ret += str_wrap("(r%d)", real_first_time);
-        ret += str_wrap(", c/l: %d/%d] [", cost, loss);
-
-        for (const Task& task : ops) ret += task.op.str() + ' ';
-        if (ops.size()) ret.pop_back();
-        return ret + ']';
-    }
-    std::string attack_str() const {
-        std::string ret = str_wrap("[dmg: %d, f: %2d, l: %3d] [", res.dmg_dealt, res.dmg_time, loss);
-        for (const Task& task : ops) {
-            ret += task.op.str();
-            if (task.round) ret += str_wrap("(+%d)", task.round);
-            ret.push_back(' ');
-        }
-        if (ops.size()) ret.pop_back();
-        return ret + ']';
-    }
-
-    int real_f_succ() const {
-        int ans = std::min(res.first_succ, max_f_succ);
-        if (ans <= 40) return ans;
-        return 40 + (ans - 40) / (res.danger_encounter + 1);
-    }
-    /**
-     * @brief 比较当前行动序列与另一行动序列在“防守”方面的表现
-     * 
-     * @param other 要比较的另一行动序列
-     * @return bool 当前行动序列在“防守”方面是否优于other
-     */
-    bool operator>(const Operation_list& other) const {
-        if (real_f_succ() != other.real_f_succ()) return real_f_succ() > other.real_f_succ();
-        return loss - res.ant_killed * 5 + res.succ_ant * 20 < other.loss - other.res.ant_killed * 5 + other.res.succ_ant * 20;
-    }
-    /**
-     * @brief 比较当前行动序列与另一行动序列在“进攻”方面的表现
-     * @note 比较优先级：对敌方造成的伤害、行动开销
-     * @param other 要比较的另一行动序列
-     * @return bool 当前行动序列在“进攻”方面是否优于other
-     */
-    bool attack_better_than(const Operation_list& other) const {
-        int s_score = res.dmg_dealt - res.dmg_time + (res.dmg_time <= 4);
-        int o_score = other.res.dmg_dealt - other.res.dmg_time + (res.dmg_time <= 4);
-        if (s_score != o_score) return s_score > o_score;
-        return loss < other.loss;
-    }
-};
-
 class AI_ {
     public:
         Logger logger;
@@ -335,11 +252,18 @@ class AI_ {
             // 操作重排序
             std::sort(ops.begin(), ops.end(), [](const Operation& a, const Operation& b){return a.type == DowngradeTower && b.type != DowngradeTower;});
 
+            // Simulator log
+            logger.err("Sim:%d Round:%d", Simulator::sim_count - last_sim_count, Simulator::round_count - last_round_count);
+            last_sim_count = Simulator::sim_count;
+            last_round_count = Simulator::round_count;
+
             return ops;
         }
 
     private:
         std::string pred;
+        int last_sim_count = 0;
+        int last_round_count = 0;
         // 模拟检查：检查Simulator对一回合后的预测结果是否与实测符合
         void ai_simulation_checker_pre(const GameInfo &game_info, const std::vector<Operation>& opponent_op) {
             std::string cur;
@@ -615,6 +539,11 @@ class AI_ {
                             }
                         }
                     }
+                } else {
+                    Op_generator gen(game_info, pid, avail_money);
+                    gen << Sell_cfg{3, 3};
+                    gen.generate_sell_list();
+                    for (const Sell_operation& s : gen.sell_list) logger.err(s.str());
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
                     logger.err("best: " + best_result.defence_str());

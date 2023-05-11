@@ -21,6 +21,9 @@ struct Sim_result {
 // 模拟器类
 class Simulator {
 public:
+    static int sim_count;
+    static int round_count;
+
     const int pid;
     GameInfo info;                          // Game state
     std::vector<Operation> operations[2];   // Players' operations which are about to be applied to current game state.
@@ -37,6 +40,7 @@ public:
      * @param atk_side 本次模拟所关注的“进攻方”，只有进攻方的蚂蚁以及“防守方”的塔会被模拟。默认为两方都模拟
      */
     explicit Simulator(const GameInfo& curr_info, int pid, int atk_side = -1) : info(curr_info), pid(pid) {
+        sim_count++;
         for (int i = 0; i < 2; i++) info.bases[i].hp = INIT_HEALTH;
         if (atk_side != -1) set_side(atk_side);
     }
@@ -63,6 +67,7 @@ public:
         for (int i = 0; i < 2; i++) std::sort(task_list[i].begin(), task_list[i].end(), __cmp_downgrade_last); // 将降级操作排到最后(因为操作从最后开始加)
 
         for (int _r = 0; _r < round; ++_r) {
+            round_count++;
             if (pid == 0) {
                 // Add player0's operation
                 __add_op(_r, 0);
@@ -266,3 +271,5 @@ public:
         return true;
     }
 };
+int Simulator::sim_count = 0;
+int Simulator::round_count = 0;

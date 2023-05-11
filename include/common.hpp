@@ -180,6 +180,10 @@ struct Pos {
     int x;
     int y;
 
+    bool operator==(const Pos& other) const {
+        return x == other.x && y == other.y;
+    }
+
     int dist_to(int x1, int x2) const {
         return distance(x, y, x1, x2);
     }
@@ -220,6 +224,7 @@ static constexpr int MOVE_COST[8] = {0, 3, 6, 12, 24, 48, 96, 192}; // “搬迁
 
 static constexpr int UPGRADE_COST[3] = {0, LEVEL2_TOWER_UPGRADE_PRICE, LEVEL3_TOWER_UPGRADE_PRICE}; // 升级i级塔的开销
 static constexpr int LEVEL_REFUND[4] = {0, 0, UPGRADE_COST[1]*4/5, (UPGRADE_COST[1]+UPGRADE_COST[2])*4/5}; // i级塔的“等级价值”
+static constexpr int DOWNGRADE_REFUND[4] = {0, 0, UPGRADE_COST[1]*4/5, UPGRADE_COST[2]*4/5}; // 降级i级塔获得的钱
 
 /* Pheromone */
 static constexpr double PHEROMONE_INIT = 10,
