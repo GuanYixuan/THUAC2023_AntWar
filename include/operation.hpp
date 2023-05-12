@@ -115,10 +115,10 @@ class Sell_operation {
         std::vector<Task> ops; // 该序列中的一系列downgrade操作
         int round_needed = 0; // 完成所有操作需要的回合数，至多为2
         int earn = 0; // 最终获得的钱数
+        int destroy = 0; // 彻底拆除的塔数
 
         std::string str() const {
-            std::string ans = str_wrap("c:%3d r:%d ", earn, round_needed);
-            ans += '[';
+            std::string ans = str_wrap("c:%3d r:%d d:%d [", earn, round_needed, destroy);
             for (const Task& task : ops) ans += task.op.str() + ' ';
             if (ops.size()) ans.pop_back();
             return ans + ']';
@@ -147,6 +147,39 @@ class Defense_operation {
             ops.clear();
             round_needed = loss = cost = 0;
         }
+        // 将整个动作序列后移round回合
+        void suspend(int round) {
+            round_needed += round;
+            for (Task& t : ops) t.round += round;
+        }
+        std::string str() const {
+            std::string ans = str_wrap("c:%3d l:%3d r:%d [", cost, loss, round_needed);
+            for (const Task& task : ops) ans += task.op.str() + ' ';
+            if (ops.size()) ans.pop_back();
+            return ans + ']';
+        }
+
+        // 简单地拼接两个Defense_operation
+        Defense_operation& operator+=(const Defense_operation& other) {
+            loss += other.loss;
+            cost += other.cost;
+            ops.insert(ops.end(), other.ops.begin(), other.ops.end());
+            round_needed = std::max(round_needed, other.round_needed);
+            return *this;
+        }
+        // 简单地拼接两个Defense_operation，返回新的Defense_operation对象
+        Defense_operation operator+(const Defense_operation& other) const {
+            Defense_operation ret(*this);
+            return ret += other;
+        }
+        // （在前面）拼接一个Sell_operation，理论上仅应用于generate_operations()函数
+        Defense_operation& operator+=(const Sell_operation& other) {
+            loss += other.earn;
+            cost -= other.earn;
+            ops.insert(ops.begin(), other.ops.begin(), other.ops.end());
+            round_needed = std::max(round_needed, other.round_needed);
+            return *this;
+        }
 };
 
 // （专门用于防御的）“动作序列生成器”
@@ -173,13 +206,17 @@ class Op_generator {
 
             temp_sell = {};
             tower_count = info.tower_num_of_player(pid);
-            for (int i = 0; i < info.towers.size(); i++) if (info.towers[i].player == pid) sell_list_recur(i, sell.max_step, 0);
+
+            sell_list.clear();
+            sell_list.push_back(temp_sell); // 放一个空的，表示不需要拆除的情形
+            for (int i = 0; i < info.towers.size(); i++) if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_recur(i, sell.max_step, 0);
 
             std::sort(sell_list.begin(), sell_list.end());
         }
 
         std::vector<Defense_operation> ops;
         std::vector<Defense_operation> build_list;
+        std::vector<Defense_operation> upgrade_list;
         void generate_operations() {
             // 初始化
             ops.clear();
@@ -202,6 +239,7 @@ class Op_generator {
                     build_list.back().ops.emplace_back(upgrade_op(info.next_tower_id, target), 1);
                     build_list.back().loss += UPGRADE_COST[1] * BUILD_LOSS_MULT;
                     build_list.back().cost += UPGRADE_COST[1];
+                    build_list.back().round_needed = 1;
                 }
                 // 3级
                 for (const TowerType& target : build.lv3_options) {
@@ -211,12 +249,65 @@ class Op_generator {
                     build_list.back().ops.emplace_back(upgrade_op(info.next_tower_id, target), 2);
                     build_list.back().loss += (UPGRADE_COST[1] + UPGRADE_COST[2]) * BUILD_LOSS_MULT;
                     build_list.back().cost += UPGRADE_COST[1] + UPGRADE_COST[2];
+                    build_list.back().round_needed = 2;
                 }
             }
             // 与Sell部分进行合并
             for (const Defense_operation& bud : build_list) {
+                int first_larger_earn = -1;
+                for (const Sell_operation& curr_sell : sell_list) {
+                    if (first_larger_earn < 0 && curr_sell.earn + cash >= bud.cost) first_larger_earn = curr_sell.earn;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
 
+                    // 计算由拆除引发的开销变化
+                    int real_cost = bud.cost;
+                    int real_loss = bud.loss;
+                    if (curr_sell.destroy) {
+                        real_cost = real_cost + BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1];
+                        real_loss = real_loss + (BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1]) * BUILD_LOSS_MULT;
+                    }
+                    if (cash + curr_sell.earn < real_cost) continue;
+
+                    // 将动作添加进列表中，此处假定是拆完了再开始建
+                    ops.push_back(bud);
+                    Defense_operation& curr = ops.back();
+                    curr.cost = real_cost, curr.loss = real_loss;
+                    curr.suspend(curr_sell.round_needed);
+                    curr += curr_sell;
+                }
             }
+
+            // 解决upgrade子问题
+            upgrade_list.clear();
+            temp_build.clear();
+            for (int i = 0; i < info.towers.size(); i++)
+                if (info.towers[i].player == pid && info.towers[i].level() < 3 && !info.is_shielded_by_emp(info.towers[i])) upgrade_recur(i, upgrade.max_count);
+            // 与Sell部分进行合并
+            for (const Defense_operation& upd : upgrade_list) {
+                // 预处理涉及的塔编号
+                std::vector<int> tower_ids;
+                for (const Task& t : upd.ops) tower_ids.push_back(t.op.arg0);
+
+                int first_larger_earn = -1;
+                for (const Sell_operation& curr_sell : sell_list) {
+                    if (first_larger_earn < 0 && curr_sell.earn + cash >= upd.cost) first_larger_earn = curr_sell.earn;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+
+                    if (cash + curr_sell.earn < upd.cost) continue;
+
+                    // 检查塔编号是否冲突（不允许在动作序列中降级+升级同一个塔）
+                    bool conflict = false;
+                    for (int i = 0; i < curr_sell.ops.size() && !conflict; i++) conflict |= std::count(tower_ids.begin(), tower_ids.end(), curr_sell.ops[i].op.arg0);
+                    if (conflict) continue;
+
+                    // 将动作添加进列表中，此处假定是拆完了再开始升级
+                    ops.push_back(upd);
+                    Defense_operation& curr = ops.back();
+                    curr.suspend(curr_sell.round_needed);
+                    curr += curr_sell;
+                }
+            }
+
         }
 
         // 一系列配置函数
@@ -241,7 +332,8 @@ class Op_generator {
     private:
         int tower_count;
         Sell_operation temp_sell;
-        void sell_list_recur(int tower_id, int step_remain, int destory_count) {
+        void sell_recur(int tower_id, int step_remain, int destory_count) {
+            if (step_remain <= 0) return;
             const Tower& t = info.towers[tower_id];
             int t_level = t.level();
             assert(t.player == pid);
@@ -253,11 +345,13 @@ class Op_generator {
                 int earn_1 = dest_1 ? TOWER_REFUND[tower_count - destory_count] : DOWNGRADE_REFUND[t_level];
                 temp_sell.ops.push_back(Task(Operation(DowngradeTower, t.id)));
                 temp_sell.earn += earn_1;
+                temp_sell.destroy += dest_1;
                 // 递归
                 sell_list.push_back(temp_sell);
                 for (int i = tower_id+1; i < info.towers.size(); i++)
-                    if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_list_recur(i, step_remain-1, destory_count+dest_1);
+                    if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_recur(i, step_remain-1, destory_count+dest_1);
                 temp_sell.earn -= earn_1;
+                temp_sell.destroy -= dest_1;
 
                 // 2次降级
                 if (t_level >= 2 && sell.max_level >= 2 && step_remain >= 2) {
@@ -267,12 +361,14 @@ class Op_generator {
                     int earn_2 = ((int)dest_2 * TOWER_REFUND[tower_count - destory_count]) + DOWNGRADE_REFUND[t_level] + DOWNGRADE_REFUND[t_level-1];
                     temp_sell.ops.push_back(Task(Operation(DowngradeTower, t.id), 1));
                     temp_sell.earn += earn_2;
+                    temp_sell.destroy += dest_2;
                     temp_sell.round_needed = std::max(1, temp_sell.round_needed);
                     // 递归
                     sell_list.push_back(temp_sell);
                     for (int i = tower_id+1; i < info.towers.size(); i++)
-                        if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_list_recur(i, step_remain-2, destory_count+dest_2);
+                        if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_recur(i, step_remain-2, destory_count+dest_2);
                     temp_sell.earn -= earn_2;
+                    temp_sell.destroy -= dest_2;
                     temp_sell.round_needed = old_round_2;
 
                     // 3次降级
@@ -282,12 +378,14 @@ class Op_generator {
                         int earn_3 = TOWER_REFUND[tower_count - destory_count] + LEVEL_REFUND[3];
                         temp_sell.ops.push_back(Task(Operation(DowngradeTower, t.id), 2));
                         temp_sell.earn += earn_3;
+                        temp_sell.destroy++;
                         temp_sell.round_needed = std::max(2, temp_sell.round_needed);
                         // 递归
                         sell_list.push_back(temp_sell);
                         for (int i = tower_id+1; i < info.towers.size(); i++)
-                            if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_list_recur(i, step_remain-3, destory_count+1);
+                            if (info.towers[i].player == pid && !info.is_shielded_by_emp(info.towers[i])) sell_recur(i, step_remain-3, destory_count+1);
                         temp_sell.earn -= earn_3;
+                        temp_sell.destroy--;
                         temp_sell.ops.pop_back();
                         temp_sell.round_needed = old_round_3;
                     }
@@ -298,5 +396,60 @@ class Op_generator {
         }
 
         Defense_operation temp_build;
+        void upgrade_recur(int tower_id, int step_remain) {
+            if (step_remain <= 0) return;
+            const Tower& t = info.towers[tower_id];
+            int t_level = t.level();
+            assert(t.player == pid && t_level < 3);
+
+            if (t_level == 1) {
+                // 1级塔升2级
+                temp_build.cost += UPGRADE_COST[1];
+                temp_build.loss += UPGRADE_COST[1] * BUILD_LOSS_MULT;
+                for (const TowerType& target : upgrade.lv2_options) {
+                    temp_build.ops.emplace_back(upgrade_op(t.id, target));
+                    // 递归
+                    upgrade_list.push_back(temp_build);
+                    if (step_remain > 1) for (int i = tower_id+1; i < info.towers.size(); i++)
+                        if (info.towers[i].player == pid && info.towers[i].level() < 3 && !info.is_shielded_by_emp(info.towers[i])) upgrade_recur(i, step_remain-1);
+                    temp_build.ops.pop_back();
+                }
+                // 1级塔升3级
+                int old_round_2 = temp_build.round_needed;
+                temp_build.cost += UPGRADE_COST[2];
+                temp_build.loss += UPGRADE_COST[2] * BUILD_LOSS_MULT;
+                temp_build.round_needed = std::max(old_round_2, 1);
+                if (step_remain >= 2) for (const TowerType& target : upgrade.lv3_options) {
+                    TowerType lv2_target = TowerType((int)target / 10);
+                    temp_build.ops.emplace_back(upgrade_op(t.id, lv2_target));
+                    temp_build.ops.emplace_back(upgrade_op(t.id, target), 1);
+                    // 递归
+                    upgrade_list.push_back(temp_build);
+                    if (step_remain > 2) for (int i = tower_id+1; i < info.towers.size(); i++)
+                        if (info.towers[i].player == pid && info.towers[i].level() < 3 && !info.is_shielded_by_emp(info.towers[i])) upgrade_recur(i, step_remain-2);
+                    temp_build.ops.pop_back();
+                    temp_build.ops.pop_back();
+                }
+                temp_build.cost -= (UPGRADE_COST[1] + UPGRADE_COST[2]);
+                temp_build.loss -= (UPGRADE_COST[1] + UPGRADE_COST[2]) * BUILD_LOSS_MULT;
+                temp_build.round_needed = old_round_2;
+            } else {
+                // 2级塔升3级
+                temp_build.cost += UPGRADE_COST[2];
+                temp_build.loss += UPGRADE_COST[2] * BUILD_LOSS_MULT;
+                for (const TowerType& target : upgrade.lv3_options) {
+                    temp_build.ops.emplace_back(upgrade_op(t.id, target));
+                    // 递归
+                    upgrade_list.push_back(temp_build);
+                    if (step_remain > 1) for (int i = tower_id+1; i < info.towers.size(); i++)
+                        if (info.towers[i].player == pid && info.towers[i].level() < 3 && !info.is_shielded_by_emp(info.towers[i])) upgrade_recur(i, step_remain-1);
+                    temp_build.ops.pop_back();
+                }
+                temp_build.cost -= UPGRADE_COST[2];
+                temp_build.loss -= UPGRADE_COST[2] * BUILD_LOSS_MULT;
+            }
+
+        }
+
         static constexpr double BUILD_LOSS_MULT = 1 - TOWER_DOWNGRADE_REFUND_RATIO;
 };
