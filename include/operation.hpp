@@ -153,7 +153,7 @@ class Defense_operation {
             for (Task& t : ops) t.round += round;
         }
         std::string str() const {
-            std::string ans = str_wrap("c:%3d l:%3d r:%d [", cost, loss, round_needed);
+            std::string ans = str_wrap("[c:%3d l:%3d r:%d] [", cost, loss, round_needed);
             for (const Task& task : ops) ans += task.op.str() + ' ';
             if (ops.size()) ans.pop_back();
             return ans + ']';
@@ -194,7 +194,9 @@ class Op_generator {
         Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar}, {TowerType::Double, TowerType::MortarPlus}};
         LS_cfg ls = {false};
 
-        explicit Op_generator(const GameInfo& info, int pid, int cash) : info(info), pid(pid), cash(cash) {}
+        explicit Op_generator(const GameInfo& info, int pid, int _cash = -1) : info(info), pid(pid), cash(_cash) {
+            if (cash == -1) cash = info.coins[pid];
+        }
 
         
         bool sell_list_generated = false;
@@ -438,6 +440,7 @@ class Op_generator {
                 temp_build.cost += UPGRADE_COST[2];
                 temp_build.loss += UPGRADE_COST[2] * BUILD_LOSS_MULT;
                 for (const TowerType& target : upgrade.lv3_options) {
+                    if ((int)target / 10 != t.type) continue;
                     temp_build.ops.emplace_back(upgrade_op(t.id, target));
                     // 递归
                     upgrade_list.push_back(temp_build);

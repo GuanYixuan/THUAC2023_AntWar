@@ -44,15 +44,16 @@ class Util {
         }
         return ans;
     }
-
     /**
-     * @brief 计算在给定点释放EVA后，添加护盾的蚂蚁数量
+     * @brief 获取在给定点释放EVA后，添加护盾的蚂蚁编号
      * @param pos 释放EVA的坐标
      * @param player_id 【释放EVA】的玩家编号
-     * @return int 添加护盾的蚂蚁数量
+     * @return std::vector<int> 添加护盾的蚂蚁编号列表
      */
-    static int EVA_ant_count(const Pos& pos, int player_id) {
-        return std::count_if(info->ants.begin(), info->ants.end(), [&](const Ant& a){return a.player == player_id && distance(a.x, a.y, pos.x, pos.y) <= EVA_RANGE;});
+    static std::vector<int> EVA_ant(const Pos& pos, int player_id) {
+        std::vector<int> ans;
+        for (const Ant& a : info->ants) if (a.player == player_id && distance(a.x, a.y, pos.x, pos.y) <= EVA_RANGE) ans.push_back(a.id);
+        return ans;
     }
     /**
      * @brief 计算在给定点释放EMP后，被屏蔽的塔数量
@@ -539,11 +540,6 @@ class AI_ {
                             }
                         }
                     }
-                } else {
-                    Op_generator gen(game_info, pid, avail_money);
-                    gen << Sell_cfg{3, 3};
-                    gen.generate_sell_list();
-                    for (const Sell_operation& s : gen.sell_list) logger.err(s.str());
                 }
                 if (best_result.ops.size()) { // 实施搜索结果
                     logger.err("best: " + best_result.defence_str());
@@ -565,41 +561,56 @@ class AI_ {
                 }
             }
 
-            // 进攻搜索：EVA和DFL
-            // 总体思想：我不着急，钱尚可，要求2~3回合内打到对面基地
+            // 进攻搜索：EVA
+            // 总体思想：尽量2~3回合内打到对面基地，减少对方反应时间
             bool attacking = false;
             Operation_list EVA_raw({}, EVA_SIM_ROUND, -1), best_EVA(EVA_raw);
-            Operation_list DFL_raw({}, DFL_SIM_ROUND, -1), best_DFL(DFL_raw);
-            constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion), DFL(SuperWeaponType::Deflector);
+            constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion);
             bool EVA_economy_advantage = (game_info.coins[!pid] <= 130) && (avail_money >= 130);
             if (raw_f_succ >= 30 && (avail_money >= 210 || EVA_economy_advantage)) {
+                std::vector<std::vector<int>> scaned;
                 if (game_info.super_weapon_cd[pid][EVA] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
-                    Pos p{x, y};
-                    int ant_count = Util::EVA_ant_count(p, pid);
-                    if (MAP_PROPERTY[x][y] == -1 || !ant_count) continue;
-
-                    Operation_list opl({EVA_op(p)}, EVA_SIM_ROUND, -ant_count);
-                    opl.atk_side = pid;
-
-                    if (opl.attack_better_than(best_EVA)) best_EVA = opl;
-                    if (opl.res.dmg_dealt > EVA_raw.res.dmg_dealt && (opl.res.dmg_time <= 3 || (opl.res.dmg_dealt >= opl.res.dmg_time - 2) || ant_count >= 3))
-                        logger.err("Potential EVA %s", opl.attack_str().c_str());
-                }
-                if (game_info.super_weapon_cd[pid][DFL] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
                     if (MAP_PROPERTY[x][y] == -1) continue;
 
-                    Operation_list opl({DFL_op(p)}, DFL_SIM_ROUND); // 暂时不知设什么cost好
-                    opl.atk_side = pid;
-                    opl.loss = opl.res.dmg_time;
+                    std::vector<int> curr(Util::EVA_ant(p, pid));
+                    if (!curr.size() || std::count(scaned.begin(), scaned.end(), curr)) continue;
+                    scaned.push_back(curr);
 
-                    if (opl.attack_better_than(best_DFL)) best_DFL = opl;
-                    if (opl.res.dmg_dealt > DFL_raw.res.dmg_dealt) logger.err("Potential DFL %s", opl.attack_str().c_str());
+                    Operation_list opl({EVA_op(p)}, EVA_SIM_ROUND, -curr.size());
+                    opl.atk_side = pid;
+
+                    if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt) continue;
+
+                    // 模拟对方防守
+                    Simulator raw_sim(game_info, pid, pid);
+                    raw_sim.task_list[pid].emplace_back(EVA_op(p));
+                    raw_sim.step_to_next_player();
+
+                    Op_generator generator(raw_sim.info, !pid);
+                    generator.generate_operations();
+
+                    bool defended = false;
+                    for (const Defense_operation& op_list : generator.ops) {
+                        Simulator atk_sim(raw_sim.info, !pid, pid);
+                        atk_sim.task_list[!pid] = op_list.ops;
+                        Sim_result res = atk_sim.simulate(EVA_SIM_ROUND, EVA_SIM_ROUND);
+
+                        if (res.first_succ > EVA_SIM_ROUND || res.succ_ant < EVA_raw.res.dmg_dealt) {
+                            defended = true;
+                            logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
+                            break;
+                        }
+                    }
+                    // 如果（对方）未找到解，则更新答案
+                    if (!defended) {
+                        logger.err("Not solved EVA %s", opl.attack_str().c_str());
+                        if (opl.attack_better_than(best_EVA)) best_EVA = opl;
+                    }
                 }
 
-                bool fast_EVA_trigger = (best_EVA.res.dmg_time <= 2);
-                bool many_EVA_trigger = (best_EVA.loss <= -4 && best_EVA.res.dmg_time <= 4 && tower_value[!pid] <= 180);
-                if (game_info.super_weapon_cd[pid][EVA] <= 0 && !attacking) if (fast_EVA_trigger || many_EVA_trigger) {
+                bool fast_EVA_trigger = (best_EVA.res.dmg_time <= 5);
+                if (game_info.super_weapon_cd[pid][EVA] <= 0 && !attacking) if (best_EVA.res.dmg_dealt > EVA_raw.res.dmg_dealt && fast_EVA_trigger) {
                     logger.err("Conduct EVA attack " + best_EVA.attack_str());
                     ops.push_back(best_EVA.ops.front().op);
                     avail_money -= SUPER_WEAPON_INFO[EVA][3];
@@ -619,8 +630,6 @@ class AI_ {
                     if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
 
                     int banned_money = Util::EMP_banned_money(p, !pid);
-                    // bool op_enough_cash = game_info.coins[!pid] + std::max(tower_value[!pid] - banned_money - 84, 0) / 2 >= 180;
-                    // if (op_enough_cash && op_ls_ready) continue;
                     Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -banned_money-Util::EMP_highland_count(p, !pid));
                     opl.atk_side = pid;
 

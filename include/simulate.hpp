@@ -59,6 +59,43 @@ public:
     }
 
     static constexpr int DANGER_RANGE = 4;
+
+    // 推进“半回合”，即进入到对手的决策阶段
+    void step_to_next_player(int r_start = 0) {
+        if (pid == 0) {
+            __add_op(r_start, 0);
+            apply_operations_of_player(0);
+        } else {
+            __add_op(r_start, 1);
+            apply_operations_of_player(1);
+            next_round();
+        }
+    }
+
+    // 模拟round步，一定要注意task_list中的是“相对时间”
+    void step_simulation(int round, int r_start = 0) {
+        for (int r = r_start; r < round + r_start; r++) {
+            if (pid == 0) {
+                // Add player0's operation
+                __add_op(r, 0);
+                apply_operations_of_player(0);
+                // Add player1's operation
+                __add_op(r, 1);
+                apply_operations_of_player(1);
+                // Next round
+                if (!next_round()) break;
+            } else {
+                // Add player1's operation
+                __add_op(r, 1);
+                apply_operations_of_player(1);
+                // Next round
+                if (!next_round()) break;
+                // Add player0's operation
+                __add_op(r, 0);
+                apply_operations_of_player(0);
+            }
+        }
+    }
     Sim_result simulate(int round, int stopping_f_succ) {
         Sim_result res;
         res.first_succ = res.dmg_time = res.first_enc = MAX_ROUND + 1;
@@ -68,29 +105,7 @@ public:
 
         for (int _r = 0; _r < round; ++_r) {
             round_count++;
-            if (pid == 0) {
-                // Add player0's operation
-                __add_op(_r, 0);
-                // Apply player0's operation
-                apply_operations_of_player(0);
-                // Add player1's operation
-                __add_op(_r, 1);
-                // Apply player1's operation
-                apply_operations_of_player(1);
-                // Next round
-                if (!next_round()) break;
-            } else {
-                // Add player1's operation
-                __add_op(_r, 1);
-                // Apply player1's operation
-                apply_operations_of_player(1);
-                // Next round
-                if (!next_round()) break;
-                // Add player0's operation
-                __add_op(_r, 0);
-                // Apply player0's operation
-                apply_operations_of_player(0);
-            }
+            step_simulation(1, _r);
             if (res.first_succ > MAX_ROUND) for (const Ant& a : info.ants) {
                 if (a.player == pid || distance(a.x, a.y, Base::POSITION[pid][0], Base::POSITION[pid][1]) > DANGER_RANGE) continue;
                 if (!std::count(enc_ant_id.begin(), enc_ant_id.end(), a.id)) {
