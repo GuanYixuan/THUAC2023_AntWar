@@ -192,13 +192,12 @@ class Op_generator {
         Sell_cfg sell = {2, 3};
         Build_cfg build = {true, {TowerType::Quick, TowerType::Mortar}, {TowerType::Double, TowerType::Sniper, TowerType::MortarPlus, TowerType::Cannon}};
         Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar}, {TowerType::Double, TowerType::MortarPlus}};
-        LS_cfg ls = {false};
+        LS_cfg ls_cfg = {false};
 
         explicit Op_generator(const GameInfo& info, int pid, int _cash = -1) : info(info), pid(pid), cash(_cash) {
             if (cash == -1) cash = info.coins[pid];
         }
 
-        
         bool sell_list_generated = false;
         std::vector<Sell_operation> sell_list;
         // 生成“卖出列表”
@@ -292,10 +291,9 @@ class Op_generator {
 
                 int first_larger_earn = -1;
                 for (const Sell_operation& curr_sell : sell_list) {
-                    if (first_larger_earn < 0 && curr_sell.earn + cash >= upd.cost) first_larger_earn = curr_sell.earn;
-                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
-
                     if (cash + curr_sell.earn < upd.cost) continue;
+                    else if (first_larger_earn < 0) first_larger_earn = curr_sell.earn;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
 
                     // 检查塔编号是否冲突（不允许在动作序列中降级+升级同一个塔）
                     bool conflict = false;
@@ -310,6 +308,25 @@ class Op_generator {
                 }
             }
 
+            if (ls_cfg.available && info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0) {
+                // 解决LS子问题
+                Defense_operation ls;
+                ls.loss = 450, ls.cost = 150;
+                ls.ops.emplace_back(lightning_op(LIGHTNING_POS[pid]));
+                // 与Sell部分进行合并
+                int first_larger_earn = -1;
+                for (const Sell_operation& curr_sell : sell_list) {
+                    if (cash + curr_sell.earn < ls.cost) continue;
+                    else if (first_larger_earn < 0) first_larger_earn = curr_sell.earn;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+
+                    // 将动作添加进列表中，此处假定是拆完了再放LS
+                    ops.push_back(ls);
+                    Defense_operation& curr = ops.back();
+                    curr.suspend(curr_sell.round_needed);
+                    curr += curr_sell;
+                }
+            }
         }
 
         // 一系列配置函数
@@ -327,7 +344,7 @@ class Op_generator {
             return *this;
         }
         Op_generator& operator<<(const LS_cfg& new_ls) {
-            ls = new_ls;
+            ls_cfg = new_ls;
             return *this;
         }
 
@@ -454,5 +471,6 @@ class Op_generator {
 
         }
 
+        static constexpr Pos LIGHTNING_POS[2] {{3, 9}, {15, 9}};
         static constexpr double BUILD_LOSS_MULT = 1 - TOWER_DOWNGRADE_REFUND_RATIO;
 };

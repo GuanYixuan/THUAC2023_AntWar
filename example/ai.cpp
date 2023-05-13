@@ -318,12 +318,6 @@ class AI_ {
             int sim_round = get_sim_round(game_info.round);
             int tower_num = game_info.tower_num_of_player(pid);
 
-            // 初始策略
-            if (game_info.round == 0) {
-                ops.push_back(build_op(FIRST_TOWER_POS[pid]));
-                return;
-            }
-
             // 处理计划任务
             bool conducted = false;
             while (schedule_queue.size() && schedule_queue.top() <= game_info.round) {
@@ -437,47 +431,17 @@ class AI_ {
                     }
 
                     // 搜索：（拆除）+升级
-                    for (auto it = game_info.towers.begin(); ; it++) {
-                        int downgrade_income = 0; // 降级收入
-                        std::optional<Operation> down_op = std::nullopt;
-                        if (it != game_info.towers.end()) { // 如果要降级
-                            const Tower& t_down = *it;
-                            if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
+                    Op_generator upd_gen(game_info, pid, avail_money);
+                    upd_gen << Build_cfg{false};
+                    upd_gen.generate_operations();
 
-                            int down_level = t_down.level();
-                            bool banned_lv3 = (down_level == 3) && (t_down.type == TowerType::Double || t_down.type == TowerType::MortarPlus);
-                            if (banned_lv3 && !warning_status) continue; // 非紧急情况下，不允许降级某些主力3级塔
+                    for (const Defense_operation& op_list : upd_gen.ops) {
+                        Operation_list opl({}, -1, op_list.loss, op_list.cost, !pid);
+                        opl.ops = op_list.ops;
+                        opl.evaluate(sim_round);
 
-                            down_op = Operation(DowngradeTower, t_down.id);
-                            if (logger.warn_if(!game_info.is_operation_valid(pid, down_op.value()), "invalid destruct attempt")) continue;
-
-                            downgrade_income = game_info.get_operation_income(pid, down_op.value());
-                        } // 否则不降级
-
-                        for (const Tower& t_up : game_info.towers) {
-                            if (t_up.player != pid || game_info.is_shielded_by_emp(t_up)) continue; // 游戏规则
-
-                            bool path_changing = down_op.has_value() && down_op.value().arg0 == t_up.id && t_up.level() != 1;
-                            if (down_op.has_value() && down_op.value().arg0 == t_up.id && !path_changing) continue; // 现在允许切换路线了
-
-                            int tower_level = t_up.level();
-                            int total_cost = UPGRADE_COST[tower_level-path_changing] - downgrade_income;
-                            if (tower_level == 3 || total_cost > avail_money) continue;
-
-                            for (const TowerType* const upd_path : UPDATE_SERIES) {
-                                const Operation& upd_op = upgrade_op(t_up, upd_path[tower_level-1-path_changing]);
-                                if (upd_path[tower_level-1-path_changing] / 10 != t_up.type) continue; // 升级路线不匹配
-                                if (logger.warn_if(!game_info.is_operation_valid(pid, upd_op), "invalid upgrade attempt")) continue;
-
-                                Operation_list opl({}, -1, UPGRADE_COST[tower_level-path_changing] * UPGRADE_COST_MULT + downgrade_income, total_cost, !pid); // 为升级提供优惠
-                                opl.append(down_op);
-                                opl.append(upd_op, path_changing);
-                                opl.evaluate(sim_round, best_result.res.first_succ);
-                                if (!opl.res.early_stop && opl > raw_result) logger.err("upd: " + opl.defence_str());
-                                if (opl > best_result) best_result = opl;
-                            }
-                        }
-                        if (it == game_info.towers.end()) break;
+                        if (!opl.res.early_stop && opl > raw_result) logger.err("upd: " + opl.defence_str());
+                        if (opl > best_result) best_result = opl;
                     }
 
                     // 搜索：搬迁
@@ -522,22 +486,17 @@ class AI_ {
                     constexpr SuperWeaponType LS(SuperWeaponType::LightningStorm);
                     constexpr int LS_cost = SUPER_WEAPON_INFO[LS][3];
                     if ((raw_f_succ <= EMP_HANDLE_THRESH || warn_streak > 4) && EMP_active && game_info.super_weapon_cd[pid][LS] <= 0) {
-                        if (LS_cost <= avail_money) {
-                            Operation_list opl({lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT, LS_cost, !pid);
+                        Op_generator gen(game_info, pid, avail_money);
+                        gen << Sell_cfg{3, 3} << Build_cfg{false} << Upgrade_cfg{0} << LS_cfg{true};
+                        gen.generate_operations();
+
+                        for (const Defense_operation& op_list : gen.ops) {
+                            Operation_list opl({}, -1, op_list.loss, op_list.cost, !pid);
+                            opl.ops = op_list.ops;
+                            opl.evaluate(sim_round);
+
                             logger.err("LS:    " + opl.defence_str());
                             if (opl > best_result) best_result = opl;
-                        } else {
-                            for (const Tower& t_down : game_info.towers) {
-                                if (t_down.player != pid || game_info.is_shielded_by_emp(t_down)) continue; // 游戏规则
-                                Operation down_op(DowngradeTower, t_down.id);
-                                if (logger.warn_if(!game_info.is_operation_valid(pid, down_op), "invalid destruct(LS) attempt")) continue;
-
-                                int downgrade_income = game_info.get_operation_income(pid, down_op);
-                                if (downgrade_income + avail_money < SUPER_WEAPON_INFO[LS][3]) continue; // 钱不够
-                                Operation_list opl({down_op, lightning_op(LIGHTNING_POS[pid])}, sim_round, LS_cost * LIGHTNING_MULT + downgrade_income, LS_cost, !pid);
-                                logger.err("LS(-): " + opl.defence_str());
-                                if (opl > best_result) best_result = opl;
-                            }
                         }
                     }
                 }
@@ -675,9 +634,6 @@ class AI_ {
             if (curr_round < 150) return 70 + curr_round / 3;
             return 120;
         }
-
-        static constexpr Pos FIRST_TOWER_POS[2] {{4, 9}, {14, 9}};
-        static constexpr Pos LIGHTNING_POS[2] {{3, 9}, {15, 9}};
 
         static constexpr int MIN_TOWER_DIST = 4;
         static constexpr int MIN_TOWER_DIST_EARLY = 5;
