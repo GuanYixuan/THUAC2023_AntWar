@@ -143,6 +143,7 @@ class Defense_operation {
         int loss = 0;
         int cost = 0; // 花费的钱数
 
+        // 清空整个序列并重置开销信息
         void clear() {
             ops.clear();
             round_needed = loss = cost = 0;
@@ -151,6 +152,10 @@ class Defense_operation {
         void suspend(int round) {
             round_needed += round;
             for (Task& t : ops) t.round += round;
+        }
+        // 获取此序列中是否含有LS动作
+        bool has_ls() const {
+            return std::count_if(ops.begin(), ops.end(), [](const Task& t){return t.op.type == OperationType::UseLightningStorm;});
         }
         std::string str() const {
             std::string ans = str_wrap("[c:%3d l:%3d r:%d] [", cost, loss, round_needed);
