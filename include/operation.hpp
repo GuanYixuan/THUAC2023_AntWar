@@ -15,7 +15,7 @@ class Operation_list {
 
     int atk_side;
     Sim_result res;
-    int max_f_succ = 1e7;
+    double max_f_succ = 1e7;
 
     explicit Operation_list(const std::vector<Operation>& _ops, int eval_round = -1, int _loss = 0, int _cost = 0, int _atk_side = -1)
     : loss(_loss), cost(_cost), atk_side(_atk_side) {
@@ -38,10 +38,10 @@ class Operation_list {
 
     std::string defence_str() const {
         std::string ret;
-        int real_first_time = real_f_succ();
+        double real_first_time = real_f_succ();
 
-        ret += str_wrap("[s/enc: %d/%d, f/enc: %3d/%d", res.succ_ant, res.danger_encounter, res.first_succ, res.first_enc);
-        if (real_first_time != res.first_succ) ret += str_wrap("(r%d)", real_first_time);
+        ret += str_wrap("[s/enc/o: %d/%d/%d, f/enc: %3d/%d", res.succ_ant, res.danger_encounter, res.old_ant, res.first_succ, res.first_enc);
+        if (real_first_time != res.first_succ) ret += str_wrap("(r%.0lf)", real_first_time);
         ret += str_wrap(", c/l: %d/%d] [", cost, loss);
 
         for (const Task& task : ops) ret += task.op.str() + ' ';
@@ -59,10 +59,10 @@ class Operation_list {
         return ret + ']';
     }
 
-    int real_f_succ() const {
-        int ans = std::min(res.first_succ, max_f_succ);
+    double real_f_succ() const {
+        double ans = std::min((double)res.first_succ, max_f_succ);
         if (ans <= 40) return ans;
-        return 40 + (ans - 40) / (res.danger_encounter + 1);
+        return 40 + (ans - 40) / (res.danger_encounter + res.old_ant + 1);
     }
     /**
      * @brief 比较当前行动序列与另一行动序列在“防守”方面的表现

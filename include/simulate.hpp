@@ -9,13 +9,15 @@ struct Sim_result {
     int first_succ; // 模拟过程中我方第一次掉血的回合数（相对时间）
     int danger_encounter; // “危险抵近”（即容易被套盾发起攻击）的蚂蚁数
     int first_enc; // “第一次危险抵近”的回合数（相对时间）
+    int old_ant; // 对方老死的蚂蚁数
 
     int dmg_dealt; // 模拟过程中对方掉的血
     int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
 
     bool early_stop; // 这一模拟结果是否是提前停止而得出的
 
-    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), danger_encounter(99), first_enc(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1), early_stop(false) {}
+    constexpr Sim_result() : succ_ant(99), ant_killed(99), first_succ(0), danger_encounter(99), first_enc(0),
+        old_ant(99), dmg_dealt(0), dmg_time(MAX_ROUND + 1), early_stop(false) {}
 };
 
 // 模拟器类
@@ -31,6 +33,7 @@ public:
 
     bool verbose = 0;
     int ants_killed[2] = {0, 0};
+    int old_ants[2] = {0, 0};
 
     static constexpr int INIT_HEALTH = 49;
     /**
@@ -123,6 +126,7 @@ public:
         }
 
         res.ant_killed = ants_killed[pid];
+        res.old_ant = old_ants[pid];
         res.danger_encounter = enc_ant_id.size();
         res.succ_ant = INIT_HEALTH - info.bases[pid].hp;
         res.dmg_dealt = INIT_HEALTH - info.bases[!pid].hp;
@@ -269,6 +273,7 @@ public:
         info.update_pheromone_for_ants(); // 正常update信息素，因为防御方不会出蚂蚁
         // 5) Clear dead and succeeded ants
         for (int i = 0; i < 2; i++) ants_killed[!i] = std::count_if(info.ants.begin(), info.ants.end(), [i](const Ant& a){ return a.state == AntState::Fail && a.player == i; });
+        for (int i = 0; i < 2; i++) old_ants[!i] += std::count_if(info.ants.begin(), info.ants.end(), [i](const Ant& a){ return a.state == AntState::TooOld && a.player == i; });
         info.clear_dead_and_succeeded_ants();
         // 6) Barracks generate new ants
         generate_ants();
