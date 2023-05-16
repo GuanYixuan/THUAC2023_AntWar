@@ -40,8 +40,9 @@ class Operation_list {
         std::string ret;
         double real_first_time = real_f_succ();
 
-        ret += str_wrap("[s/enc/o: %d/%d/%d, f/enc: %3d/%d", res.succ_ant, res.danger_encounter, res.old_ant, res.first_succ, res.first_enc);
-        if (real_first_time != res.first_succ) ret += str_wrap("(r%.0lf)", real_first_time);
+        ret += str_wrap("[S/E/O: %d/%d/%d, S/E/O: %3d/%d/%d", res.succ_ant, res.danger_encounter, res.old_ant,
+            user_friendly_int(res.first_succ), user_friendly_int(res.first_enc), user_friendly_int(res.next_old));
+        if (real_first_time != res.first_succ) ret += str_wrap("(r%.1lf)", real_first_time);
         ret += str_wrap(", c/l: %d/%d] [", cost, loss);
 
         for (const Task& task : ops) ret += task.op.str() + ' ';
@@ -71,7 +72,7 @@ class Operation_list {
      */
     bool operator>(const Operation_list& other) const {
         if (real_f_succ() != other.real_f_succ()) return real_f_succ() > other.real_f_succ();
-        return loss - res.ant_killed * 5 + res.succ_ant * 20 < other.loss - other.res.ant_killed * 5 + other.res.succ_ant * 20;
+        return loss + res.old_ant * 10 + res.succ_ant * 50 < other.loss + other.res.old_ant * 10 + other.res.succ_ant * 50;
     }
     /**
      * @brief 比较当前行动序列与另一行动序列在“进攻”方面的表现
@@ -85,12 +86,19 @@ class Operation_list {
         if (s_score != o_score) return s_score > o_score;
         return loss < other.loss;
     }
+
+    private:
+    static int user_friendly_int(int a) {
+        if (a > MAX_ROUND) return -1;
+        return a;
+    }
 };
 
 // “卖出操作”的配置类
 struct Sell_cfg {
     int max_step; // “卖出序列”中的最大动作数。若希望关闭卖出操作，可将此值设为0
     int max_level; // 允许降级的最高塔等级
+    bool tweaking = false; // 是否进入“微调模式”，此模式下会尝试各种卖出操作
 };
 // “新建操作”的配置类
 struct Build_cfg {
@@ -178,12 +186,11 @@ class Defense_operation {
             return ret += other;
         }
         // （在前面）拼接一个Sell_operation，理论上仅应用于generate_operations()函数
-        Defense_operation& operator+=(const Sell_operation& other) {
-            loss += other.earn;
+        void concat_sell(const Sell_operation& other, double loss_mult = 1) {
+            loss += other.earn * loss_mult;
             cost -= other.earn;
             ops.insert(ops.begin(), other.ops.begin(), other.ops.end());
             round_needed = std::max(round_needed, other.round_needed);
-            return *this;
         }
 };
 
@@ -236,14 +243,14 @@ class Op_generator {
                 // 1级
                 temp_build.clear();
                 temp_build.ops.emplace_back(build_op(p));
-                temp_build.loss = BUILD_COST[tower_count+1] * BUILD_LOSS_MULT;
+                temp_build.loss = BUILD_COST[tower_count+1] / BUILD_LOSS_DIV;
                 temp_build.cost = BUILD_COST[tower_count+1];
                 build_list.push_back(temp_build);
                 // 2级
                 for (const TowerType& target : build.lv2_options) {
                     build_list.push_back(temp_build);
                     build_list.back().ops.emplace_back(upgrade_op(info.next_tower_id, target), 1);
-                    build_list.back().loss += UPGRADE_COST[1] * BUILD_LOSS_MULT;
+                    build_list.back().loss += UPGRADE_COST[1] / BUILD_LOSS_DIV;
                     build_list.back().cost += UPGRADE_COST[1];
                     build_list.back().round_needed = 1;
                 }
@@ -253,24 +260,25 @@ class Op_generator {
                     build_list.push_back(temp_build);
                     build_list.back().ops.emplace_back(upgrade_op(info.next_tower_id, lv2_target), 1);
                     build_list.back().ops.emplace_back(upgrade_op(info.next_tower_id, target), 2);
-                    build_list.back().loss += (UPGRADE_COST[1] + UPGRADE_COST[2]) * BUILD_LOSS_MULT;
+                    build_list.back().loss += (UPGRADE_COST[1] + UPGRADE_COST[2]) / BUILD_LOSS_DIV;
                     build_list.back().cost += UPGRADE_COST[1] + UPGRADE_COST[2];
                     build_list.back().round_needed = 2;
                 }
             }
             // 与Sell部分进行合并
+            if (sell.tweaking) build_list.emplace_back();
             for (const Defense_operation& bud : build_list) {
                 int first_larger_earn = -1;
                 for (const Sell_operation& curr_sell : sell_list) {
                     if (first_larger_earn < 0 && curr_sell.earn + cash >= bud.cost) first_larger_earn = curr_sell.earn;
-                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn && !sell.tweaking) break;
 
                     // 计算由拆除引发的开销变化
                     int real_cost = bud.cost;
                     int real_loss = bud.loss;
                     if (curr_sell.destroy) {
                         real_cost = real_cost + BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1];
-                        real_loss = real_loss + (BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1]) * BUILD_LOSS_MULT;
+                        real_loss = real_loss + (BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1]) / BUILD_LOSS_DIV;
                     }
                     if (cash + curr_sell.earn < real_cost) continue;
 
@@ -279,7 +287,7 @@ class Op_generator {
                     Defense_operation& curr = ops.back();
                     curr.cost = real_cost, curr.loss = real_loss;
                     curr.suspend(curr_sell.round_needed);
-                    curr += curr_sell;
+                    curr.concat_sell(curr_sell, sell.tweaking ? TWEAK_LOSS_MULT : 1);
                 }
             }
 
@@ -298,7 +306,7 @@ class Op_generator {
                 for (const Sell_operation& curr_sell : sell_list) {
                     if (cash + curr_sell.earn < upd.cost) continue;
                     else if (first_larger_earn < 0) first_larger_earn = curr_sell.earn;
-                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn && !sell.tweaking) break;
 
                     // 检查塔编号是否冲突（不允许在动作序列中降级+升级同一个塔）
                     bool conflict = false;
@@ -309,10 +317,11 @@ class Op_generator {
                     ops.push_back(upd);
                     Defense_operation& curr = ops.back();
                     curr.suspend(curr_sell.round_needed);
-                    curr += curr_sell;
+                    curr.concat_sell(curr_sell, sell.tweaking ? TWEAK_LOSS_MULT : 1);
                 }
             }
 
+            // LS部分
             if (ls_cfg.available && info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0) {
                 // 解决LS子问题
                 Defense_operation ls;
@@ -329,7 +338,7 @@ class Op_generator {
                     ops.push_back(ls);
                     Defense_operation& curr = ops.back();
                     curr.suspend(curr_sell.round_needed);
-                    curr += curr_sell;
+                    curr.concat_sell(curr_sell);
                 }
             }
         }
@@ -429,7 +438,7 @@ class Op_generator {
             if (t_level == 1) {
                 // 1级塔升2级
                 temp_build.cost += UPGRADE_COST[1];
-                temp_build.loss += UPGRADE_COST[1] * BUILD_LOSS_MULT;
+                temp_build.loss += UPGRADE_COST[1] / BUILD_LOSS_DIV;
                 for (const TowerType& target : upgrade.lv2_options) {
                     temp_build.ops.emplace_back(upgrade_op(t.id, target));
                     // 递归
@@ -441,7 +450,7 @@ class Op_generator {
                 // 1级塔升3级
                 int old_round_2 = temp_build.round_needed;
                 temp_build.cost += UPGRADE_COST[2];
-                temp_build.loss += UPGRADE_COST[2] * BUILD_LOSS_MULT;
+                temp_build.loss += UPGRADE_COST[2] / BUILD_LOSS_DIV;
                 temp_build.round_needed = std::max(old_round_2, 1);
                 if (step_remain >= 2) for (const TowerType& target : upgrade.lv3_options) {
                     TowerType lv2_target = TowerType((int)target / 10);
@@ -455,12 +464,12 @@ class Op_generator {
                     temp_build.ops.pop_back();
                 }
                 temp_build.cost -= (UPGRADE_COST[1] + UPGRADE_COST[2]);
-                temp_build.loss -= (UPGRADE_COST[1] + UPGRADE_COST[2]) * BUILD_LOSS_MULT;
+                temp_build.loss -= (UPGRADE_COST[1] + UPGRADE_COST[2]) / BUILD_LOSS_DIV;
                 temp_build.round_needed = old_round_2;
             } else {
                 // 2级塔升3级
                 temp_build.cost += UPGRADE_COST[2];
-                temp_build.loss += UPGRADE_COST[2] * BUILD_LOSS_MULT;
+                temp_build.loss += UPGRADE_COST[2] / BUILD_LOSS_DIV;
                 for (const TowerType& target : upgrade.lv3_options) {
                     if ((int)target / 10 != t.type) continue;
                     temp_build.ops.emplace_back(upgrade_op(t.id, target));
@@ -471,11 +480,12 @@ class Op_generator {
                     temp_build.ops.pop_back();
                 }
                 temp_build.cost -= UPGRADE_COST[2];
-                temp_build.loss -= UPGRADE_COST[2] * BUILD_LOSS_MULT;
+                temp_build.loss -= UPGRADE_COST[2] / BUILD_LOSS_DIV;
             }
 
         }
 
         static constexpr Pos LIGHTNING_POS[2] {{3, 9}, {15, 9}};
-        static constexpr double BUILD_LOSS_MULT = 1 - TOWER_DOWNGRADE_REFUND_RATIO;
+        static constexpr int BUILD_LOSS_DIV = 5;
+        static constexpr double TWEAK_LOSS_MULT = 0.2;
 };

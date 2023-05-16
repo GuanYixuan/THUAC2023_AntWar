@@ -105,7 +105,7 @@ class Util {
      * @param player_id 被EMP攻击的玩家编号
      * @return int 被屏蔽的钱数
      */
-    static int EMP_banned_money(const Pos& pos, int player_id) {
+    static int EMP_banned_money(const Pos& pos, int player_id) { // 【可能需要debug，见#3942719】
         int ans = 0;
         int banned_count = 0;
         for (const Tower& t : info->towers) {
@@ -389,7 +389,7 @@ class AI_ {
                     [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::Deflector;});
                 bool aware_status = raw_f_succ < 20;
                 bool warning_status = EMP_active || DFL_active || EVA_emergency > 0 || raw_f_succ <= 10;
-                bool critical_status = EMP_active || DFL_active || raw_f_succ <= 6;
+                bool peace_check = (avail_money >= 130 && raw_f_succ >= 40) && (raw_result.res.next_old <= 35 || raw_result.res.first_enc <= 35);
 
                 std::string situation_log("raw: " + best_result.defence_str());
                 if (aware_status) {
@@ -409,15 +409,6 @@ class AI_ {
                         std::optional<Pos> build_pos;
                         for (const Task& t : op_list.ops) if (t.op.type == OperationType::BuildTower) build_pos = {t.op.arg0, t.op.arg1};
                         assert(!build_pos || is_highland(pid, build_pos.value().x, build_pos.value().y));
-
-                        // std::optional<int> destroy_id;
-                        // for (const Task& t : op_list.ops) if (t.op.type == OperationType::DowngradeTower) {
-                        //     int cnt = std::count_if(op_list.ops.begin(), op_list.ops.end(), [&](const Task& q){return q.op.type == t.op.type && q.op.arg0 == t.op.arg0;});
-                        //     if (cnt >= game_info.tower_of_id(t.op.arg0).value().level()) {
-                        //         destroy_id = t.op.arg0;
-                        //         break;
-                        //     }
-                        // }
 
                         Operation_list opl({}, -1, op_list.loss, op_list.cost, !pid);
                         opl.ops = op_list.ops;
@@ -461,6 +452,46 @@ class AI_ {
                             logger.err("LS:   " + opl.defence_str());
                             if (opl > best_result) best_result = opl;
                         }
+                    }
+                } else if (peace_check) { // 和平时期检查
+                    // 搜索：（拆除+）建塔/升级
+                    Op_generator build_gen(game_info, pid, avail_money);
+                    build_gen.sell.tweaking = true;
+                    build_gen.build.lv3_options.clear();
+                    build_gen.upgrade.max_count = 1;
+                    build_gen.generate_operations();
+
+                    for (const Defense_operation& op_list : build_gen.ops) {
+                        std::optional<Pos> build_pos;
+                        for (const Task& t : op_list.ops) if (t.op.type == OperationType::BuildTower) build_pos = {t.op.arg0, t.op.arg1};
+                        assert(!build_pos || is_highland(pid, build_pos.value().x, build_pos.value().y));
+
+                        if (op_list.cost > 60) continue;
+
+                        Operation_list opl({}, -1, op_list.loss, op_list.cost, !pid);
+                        opl.ops = op_list.ops;
+                        opl.evaluate(sim_round);
+
+                        // 判定修建后是否“在任何时刻都能放出LS”
+                        if (opl.res.first_succ > EMP_COVER_PENALTY) {
+                            Simulator op_done{game_info, pid, !pid};
+                            op_done.task_list[pid] = op_list.ops;
+                            op_done.simulate(op_list.round_needed+1, -1);
+
+                            int full = Util::calc_total_value(op_done.info, pid);
+                            for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                                Pos p{x, y};
+                                if (MAP_PROPERTY[x][y] == -1) continue;
+                                int residual = full - Util::EMP_banned_money(op_done.info, p, pid);
+                                if (residual < 150) {
+                                    opl.max_f_succ = EMP_COVER_PENALTY + 5 * (double(residual) / 150);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!opl.res.early_stop && opl > raw_result) logger.err((build_pos ? "p_bud: " : "p_upd: ") + opl.defence_str());
+                        if (opl > best_result) best_result = opl;
                     }
                 }
 
@@ -601,7 +632,8 @@ class AI_ {
                 logger.err("raw best_EMP: " + best_EMP.attack_str());
 
                 bool unsolved_trigger = (best_EMP.res.dmg_dealt > 100);
-                bool force_ls_trigger = (avail_value[pid] - avail_value[!pid] >= 150) || (avail_money >= 300);
+                bool force_ls_trigger = (avail_value[pid] - avail_value[!pid] >= 150);
+                force_ls_trigger |= (avail_money >= 250 && avail_value[pid] >= 300);
                 if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger)) {
                     // 不可解，或己方经济有优势时挤压对方
                     std::string pr(unsolved_trigger ? "(Unsolved)" : "(Force LS)");
@@ -611,6 +643,12 @@ class AI_ {
                     attacking = true;
                 }
             }
+
+            // if (avail_money >= 450 && game_info.bases[pid].hp <= game_info.bases[!pid].hp && !game_info.bases[pid].ant_level) {
+            //     logger.err("[Upgrading base]");
+            //     ops.emplace_back(UpgradeGeneratedAnt);
+            //     avail_money -= LEVEL2_BASE_UPGRADE_PRICE;
+            // }
         }
 
         // 当前可用钱数（计及即将执行操作的钱）
