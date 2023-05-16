@@ -15,6 +15,7 @@ struct Sim_result {
     int dmg_dealt; // 模拟过程中对方掉的血
     int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
 
+
     bool early_stop; // 这一模拟结果是否是提前停止而得出的
 
     constexpr Sim_result() : succ_ant(99), first_succ(0), danger_encounter(99), first_enc(0),
@@ -285,6 +286,12 @@ public:
         info.clear_dead_and_succeeded_ants();
         // 6) Barracks generate new ants
         generate_ants();
+        if (info.round == MAX_ROUND-1) {
+            for (const Ant& a : info.ants) {
+                next_old[!a.player] = info.round; // 最后时刻没杀死的蚂蚁都是“old”
+                old_ants[!a.player]++;
+            }
+        }
         // 7) Get basic income
         info.coins[0] += BASIC_INCOME;
         info.coins[1] += BASIC_INCOME;

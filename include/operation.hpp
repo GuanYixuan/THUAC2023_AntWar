@@ -202,8 +202,8 @@ class Op_generator {
         GameInfo info;
 
         Sell_cfg sell = {2, 3};
-        Build_cfg build = {true, {TowerType::Quick, TowerType::Mortar}, {TowerType::Double, TowerType::Sniper, TowerType::MortarPlus, TowerType::Cannon}};
-        Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar}, {TowerType::Double, TowerType::MortarPlus}};
+        Build_cfg build = {true, {TowerType::Quick, TowerType::Mortar, TowerType::Heavy}, {TowerType::Double, TowerType::Sniper, TowerType::MortarPlus, TowerType::Cannon}};
+        Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar, TowerType::Heavy}, {TowerType::Double, TowerType::MortarPlus}};
         LS_cfg ls_cfg = {false};
 
         explicit Op_generator(const GameInfo& info, int pid, int _cash = -1) : info(info), pid(pid), cash(_cash) {
@@ -326,19 +326,24 @@ class Op_generator {
                 // 解决LS子问题
                 Defense_operation ls;
                 ls.loss = 450, ls.cost = 150;
-                ls.ops.emplace_back(lightning_op(LIGHTNING_POS[pid]));
-                // 与Sell部分进行合并
-                int first_larger_earn = -1;
-                for (const Sell_operation& curr_sell : sell_list) {
-                    if (cash + curr_sell.earn < ls.cost) continue;
-                    else if (first_larger_earn < 0) first_larger_earn = curr_sell.earn;
-                    if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+                ls.ops.emplace_back(lightning_op({0, 0}));
+                for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                    if (!is_valid_pos(x, y)) continue;
+                    ls.ops.back().op = lightning_op({x, y});
 
-                    // 将动作添加进列表中，此处假定是拆完了再放LS
-                    ops.push_back(ls);
-                    Defense_operation& curr = ops.back();
-                    curr.suspend(curr_sell.round_needed);
-                    curr.concat_sell(curr_sell);
+                    // 与Sell部分进行合并
+                    int first_larger_earn = -1;
+                    for (const Sell_operation& curr_sell : sell_list) {
+                        if (cash + curr_sell.earn < ls.cost) continue;
+                        else if (first_larger_earn < 0) first_larger_earn = curr_sell.earn;
+                        if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn) break;
+
+                        // 将动作添加进列表中，此处假定是拆完了再放LS
+                        ops.push_back(ls);
+                        Defense_operation& curr = ops.back();
+                        curr.suspend(curr_sell.round_needed);
+                        curr.concat_sell(curr_sell);
+                    }
                 }
             }
         }

@@ -25,6 +25,12 @@ int banned_tower_value[2]; // 双方因EMP而不可用的固定资产
 int warn_streak; // 连续处于“响应状态”的回合数
 int EVA_emergency; // 因对手释放EVA而进入紧急情况的剩余回合数
 
+int reflect_limit; // 等待EMP结束，自身有足够资金进行“反射EMP攻击”的剩余回合数
+int reflecting_EMP_countdown; // 卖出全部塔后, 等待进攻模块放EMP的剩余回合数
+
+int peace_check_cd; // 距离下一次peace_check的最小回合数
+int last_attack_round = -100; // 上一次发动攻击的回合数（绝对时间）
+
 const GameInfo* info; // info的一份拷贝，用于Util等地
 
 
@@ -379,18 +385,24 @@ class AI_ {
 
             // 塔操作搜索
             Operation_list raw_result({}, sim_round);
+            Operation_list best_result(raw_result);
             int raw_f_succ = raw_result.res.first_succ;
-            if (game_info.round >= 12) {
-                Operation_list best_result(raw_result);
 
-                bool EMP_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
+            bool EMP_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
                     [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::EmpBlaster;});
-                bool DFL_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
-                    [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::Deflector;});
-                bool aware_status = raw_f_succ < 20;
-                bool warning_status = EMP_active || DFL_active || EVA_emergency > 0 || raw_f_succ <= 10;
-                bool peace_check = (avail_money >= 130 && raw_f_succ >= 40) && (raw_result.res.next_old <= 35 || raw_result.res.first_enc <= 35);
+            bool DFL_active = std::any_of(game_info.super_weapons.begin(), game_info.super_weapons.end(),
+                [&](const SuperWeapon& sup){return sup.player != pid && sup.type == SuperWeaponType::Deflector;});
+            bool aware_status = raw_f_succ < 20;
+            bool warning_status = EMP_active || DFL_active || EVA_emergency > 0 || raw_f_succ <= 10;
+            bool peace_check = (avail_money >= 130 || avail_value[pid] >= 250) && (raw_f_succ >= 40) && (raw_result.res.next_old <= 20 || raw_result.res.first_enc <= 20);
 
+            int enemy_base_level = game_info.bases[!pid].ant_level;
+            peace_check &= (enemy_base_level < 2) && (peace_check_cd <= 0);
+            peace_check_cd--;
+
+            aware_status &= (reflecting_EMP_countdown <= 0);
+
+            if (game_info.round >= 12 && game_info.round < 511) { // round 511 bugfix
                 std::string situation_log("raw: " + best_result.defence_str());
                 if (aware_status) {
                     warn_streak++;
@@ -398,11 +410,17 @@ class AI_ {
                     situation_log += str_wrap(", streak: %d", warn_streak);
                 } else warn_streak = 0;
                 if (EVA_emergency > 0) situation_log += str_wrap(", EVA_emer: %d", EVA_emergency);
+                if (reflect_limit > 0) situation_log += str_wrap(", wait for reflect: %d", reflect_limit);
+                if (reflecting_EMP_countdown > 0) situation_log += str_wrap(", try to EMP: %d", reflecting_EMP_countdown);
                 logger.err(situation_log);
+
+                if (raw_f_succ == 0 && EMP_active && avail_value[!pid] <= 100) reflect_limit = 50;
+                else reflect_limit--;
 
                 if (aware_status) { // 如果啥事不干基地会扣血
                     // 搜索：（拆除+）建塔/升级
                     Op_generator build_gen(game_info, pid, avail_money);
+                    if (warning_status) build_gen << Sell_cfg{3, 3};
                     build_gen.generate_operations();
 
                     for (const Defense_operation& op_list : build_gen.ops) {
@@ -416,20 +434,8 @@ class AI_ {
 
                         // 判定修建后是否“在任何时刻都能放出LS”
                         if (opl.res.first_succ > EMP_COVER_PENALTY) {
-                            Simulator op_done{game_info, pid, !pid};
-                            op_done.task_list[pid] = op_list.ops;
-                            op_done.simulate(op_list.round_needed+1, -1);
-
-                            int full = Util::calc_total_value(op_done.info, pid);
-                            for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
-                                Pos p{x, y};
-                                if (MAP_PROPERTY[x][y] == -1) continue;
-                                int residual = full - Util::EMP_banned_money(op_done.info, p, pid);
-                                if (residual < 150) {
-                                    opl.max_f_succ = EMP_COVER_PENALTY + 5 * (double(residual) / 150);
-                                    break;
-                                }
-                            }
+                            int min_avail = min_avail_money_under_EMP(game_info, op_list);
+                            if (min_avail < 150) opl.max_f_succ = EMP_COVER_PENALTY + 5 * (double(min_avail) / 150);
                         }
 
                         if (!opl.res.early_stop && opl > raw_result) logger.err((build_pos ? "bud: " : "upd: ") + opl.defence_str());
@@ -449,7 +455,7 @@ class AI_ {
                             opl.ops = op_list.ops;
                             opl.evaluate(sim_round);
 
-                            logger.err("LS:   " + opl.defence_str());
+                            if (opl > raw_result) logger.err("LS:   " + opl.defence_str());
                             if (opl > best_result) best_result = opl;
                         }
                     }
@@ -474,55 +480,60 @@ class AI_ {
 
                         // 判定修建后是否“在任何时刻都能放出LS”
                         if (opl.res.first_succ > EMP_COVER_PENALTY) {
-                            Simulator op_done{game_info, pid, !pid};
-                            op_done.task_list[pid] = op_list.ops;
-                            op_done.simulate(op_list.round_needed+1, -1);
-
-                            int full = Util::calc_total_value(op_done.info, pid);
-                            for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
-                                Pos p{x, y};
-                                if (MAP_PROPERTY[x][y] == -1) continue;
-                                int residual = full - Util::EMP_banned_money(op_done.info, p, pid);
-                                if (residual < 150) {
-                                    opl.max_f_succ = EMP_COVER_PENALTY + 5 * (double(residual) / 150);
-                                    break;
-                                }
-                            }
+                            int min_avail = min_avail_money_under_EMP(game_info, op_list);
+                            if (min_avail < 150) opl.max_f_succ = EMP_COVER_PENALTY + 5 * (double(min_avail) / 150);
                         }
 
                         if (!opl.res.early_stop && opl > raw_result) logger.err((build_pos ? "p_bud: " : "p_upd: ") + opl.defence_str());
                         if (opl > best_result) best_result = opl;
                     }
                 }
+            }
 
-                if (best_result.ops.size()) { // 实施搜索结果
-                    logger.err("best: " + best_result.defence_str());
-                    bool occupying_LS = EMP_active && best_result.res.first_succ <= raw_f_succ + 20
-                        && (avail_money + tower_value[pid] > 150 && avail_money + tower_value[pid] - best_result.cost <= 150)
-                        && !std::any_of(best_result.ops.begin(), best_result.ops.end(), [](const Task& sc){return sc.op.type == UseLightningStorm;});
-                    if (occupying_LS) logger.err("[Occupying LS, result not taken]");
-                    else for (const Task& task : best_result.ops) {
-                        if (task.round == 0) {
-                            ops.push_back(task.op);
-                            avail_money += game_info.get_operation_income(pid, task.op);
-                        } else {
-                            Task temp = task;
-                            temp.round += game_info.round;
-                            schedule_queue.push(temp);
-                            logger.err("Operation scheduled at round %3d: %s", temp.round, task.op.str(true).c_str());
-                        }
+            // Reflect EMP
+            reflecting_EMP_countdown--;
+            if (reflect_limit > 0 && avail_value[pid] >= 170) {
+                Op_generator sell_gen(game_info, pid, avail_money);
+                sell_gen << Sell_cfg{10, 3};
+                sell_gen.generate_sell_list();
+                best_result.ops = sell_gen.sell_list.back().ops;
+
+                reflect_limit = 0;
+                reflecting_EMP_countdown = 2;
+            }
+
+            if (best_result.ops.size()) { // 实施搜索结果
+                logger.err("best: " + best_result.defence_str());
+
+                if (peace_check) peace_check_cd = 30;
+
+                bool occupying_LS = EMP_active && best_result.res.first_succ <= raw_f_succ + 20
+                    && (avail_money + tower_value[pid] > 150 && avail_money + tower_value[pid] - best_result.cost <= 150)
+                    && !std::any_of(best_result.ops.begin(), best_result.ops.end(), [](const Task& sc){return sc.op.type == UseLightningStorm;});
+                if (occupying_LS) logger.err("[Occupying LS, result not taken]");
+
+                else for (const Task& task : best_result.ops) {
+                    if (task.round == 0) {
+                        ops.push_back(task.op);
+                        avail_money += game_info.get_operation_income(pid, task.op);
+                    } else {
+                        Task temp = task;
+                        temp.round += game_info.round;
+                        schedule_queue.push(temp);
+                        logger.err("Operation scheduled at round %3d: %s", temp.round, task.op.str(true).c_str());
                     }
                 }
+                return;
             }
 
             // 进攻搜索：EVA
             // 总体思想：尽量2~3回合内打到对面基地，减少对方反应时间
-            bool attacking = false;
+            int last_atk = game_info.round - last_attack_round;
             Operation_list EVA_raw({}, EVA_SIM_ROUND, -1), best_EVA(EVA_raw);
             constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion);
 
             bool EVA_economy_crit = (avail_money >= 210) || (game_info.coins[!pid] <= 130 && avail_money >= 160 + 50 * game_info.bases[!pid].ant_level);
-            if (game_info.super_weapon_cd[pid][EVA] <= 0 && !attacking && avail_money >= 100) if (raw_f_succ >= 30 && EVA_economy_crit) {
+            if (game_info.super_weapon_cd[pid][EVA] <= 0 && last_atk > 5 && avail_money >= 100) if (raw_f_succ >= 30) {
                 std::vector<std::vector<int>> scaned;
                 if (game_info.super_weapon_cd[pid][EVA] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
@@ -536,6 +547,9 @@ class AI_ {
                     opl.atk_side = pid;
 
                     if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt) continue;
+
+                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops});
+                    if (!(EVA_economy_crit || min_avail >= 160)) continue; // 部分经济要求下放到这里
 
                     // 模拟对方防守
                     Simulator raw_sim(game_info, pid, pid);
@@ -566,10 +580,24 @@ class AI_ {
 
                 bool fast_EVA_trigger = (best_EVA.res.dmg_time <= 5);
                 if (best_EVA.res.dmg_dealt > EVA_raw.res.dmg_dealt && fast_EVA_trigger) {
-                    logger.err("Conduct EVA attack " + best_EVA.attack_str());
-                    ops.push_back(best_EVA.ops.front().op);
-                    avail_money -= SUPER_WEAPON_INFO[EVA][3];
-                    attacking = true;
+                    // refine一下
+                    logger.err("EVA refining:");
+                    bool local_best = true;
+                    Operation_list best_refine(best_EVA);
+                    for (int i = 1; i <= EVA_REFINE_ROUND && local_best; i++) {
+                        best_refine.ops.front().round = i;
+                        best_refine.evaluate(EVA_SIM_ROUND);
+                        best_refine.res.dmg_time -= i; // 对模拟i回合的补偿
+                        logger.err("EVA refine: %s", best_refine.attack_str().c_str());
+                        if (best_refine.attack_better_than(best_EVA)) local_best = false;
+                    }
+
+                    if (local_best) {
+                        logger.err("Conduct EVA attack " + best_EVA.attack_str());
+                        ops.push_back(best_EVA.ops.front().op);
+                        avail_money -= SUPER_WEAPON_INFO[EVA][3];
+                        last_atk = game_info.round;
+                    }
                 }
             }
 
@@ -578,9 +606,10 @@ class AI_ {
             Operation_list EMP_raw({}, EMP_SIM_ROUND), best_EMP(EMP_raw);
             constexpr SuperWeaponType EB = SuperWeaponType::EmpBlaster;
 
+            bool reflect_tag = reflecting_EMP_countdown >= 0;
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
-            bool EMP_economy_crit = !op_ls_ready || (avail_money >= 250) || (game_info.coins[!pid] < 150 && avail_money >= 210);
-            if (game_info.super_weapon_cd[pid][EB] <= 0 && !attacking && avail_money >= 150) if (raw_f_succ >= 40 && EMP_economy_crit) {
+            bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 250) || (game_info.coins[!pid] < 150 && avail_money >= 210);
+            if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_money >= 150) if (raw_f_succ >= 40 || reflect_tag) {
                 for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
                     if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
@@ -588,7 +617,8 @@ class AI_ {
                     Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -Util::EMP_banned_money(p, !pid));
                     opl.atk_side = pid;
 
-                    if (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2) {
+                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops});
+                    if (reflect_tag || (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2)) if (EMP_economy_crit || min_avail >= 160) { // 部分经济要求下放到这里
                         // 模拟对方防守
                         Simulator raw_sim(game_info, pid, pid);
                         raw_sim.task_list[pid].emplace_back(EMP_op(p));
@@ -615,6 +645,11 @@ class AI_ {
                             }
                         }
 
+                        if (reflect_tag && opl.attack_better_than(best_EMP)) {
+                            logger.err("Possible reflect EMP %s", opl.attack_str().c_str());
+                            best_EMP = opl;
+                        }
+
                         if (ls_defended && !build_defended) {
                             logger.err("%s solved by LS", opl.attack_str().c_str());
                             if (opl.attack_better_than(best_EMP)) best_EMP = opl;
@@ -634,21 +669,60 @@ class AI_ {
                 bool unsolved_trigger = (best_EMP.res.dmg_dealt > 100);
                 bool force_ls_trigger = (avail_value[pid] - avail_value[!pid] >= 150);
                 force_ls_trigger |= (avail_money >= 250 && avail_value[pid] >= 300);
-                if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger)) {
+                if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger || (reflect_limit > 0))) {
                     // 不可解，或己方经济有优势时挤压对方
-                    std::string pr(unsolved_trigger ? "(Unsolved)" : "(Force LS)");
-                    logger.err(pr + "Conduct EMP attack " + best_EMP.attack_str());
-                    ops.push_back(best_EMP.ops.front().op);
-                    avail_money -= SUPER_WEAPON_INFO[EB][3];
-                    attacking = true;
+                    std::string pr;
+                    if (reflect_limit > 0) pr += "(Reflect)";
+                    else if (unsolved_trigger) pr += "(Unsolved)";
+                    else pr += "(Force LS)";
+
+                    // refine一下
+                    logger.err("EMP refining:");
+                    bool local_best = true;
+                    Operation_list best_refine(best_EMP);
+                    for (int i = 1; i <= EMP_REFINE_ROUND && local_best; i++) {
+                        best_refine.ops.front().round = i;
+                        best_refine.evaluate(EMP_SIM_ROUND);
+                        best_refine.res.dmg_time -= i; // 对模拟i回合的补偿
+                        if (unsolved_trigger) best_refine.res.dmg_dealt += 100;
+                        logger.err("EMP refine: %s", best_refine.attack_str().c_str());
+                        if (best_refine.attack_better_than(best_EMP)) local_best = false;
+                    }
+
+                    if (local_best || reflect_tag) {
+                        logger.err(pr + " Conduct EMP attack " + best_EMP.attack_str());
+                        ops.push_back(best_EMP.ops.front().op);
+                        avail_money -= SUPER_WEAPON_INFO[EB][3];
+                        last_atk = game_info.round;
+
+                        if (reflect_tag) reflecting_EMP_countdown = 0;
+                    }
                 }
             }
 
-            // if (avail_money >= 450 && game_info.bases[pid].hp <= game_info.bases[!pid].hp && !game_info.bases[pid].ant_level) {
-            //     logger.err("[Upgrading base]");
-            //     ops.emplace_back(UpgradeGeneratedAnt);
-            //     avail_money -= LEVEL2_BASE_UPGRADE_PRICE;
-            // }
+            bool draw_cond = (game_info.bases[pid].hp <= game_info.bases[!pid].hp) && (ants_killed[pid] <= ants_killed[!pid]);
+            bool money_cond = (avail_money >= 300) && (min_avail_money_under_EMP(game_info, {{Task(Operation(UpgradeGeneratedAnt))}}) >= 150);
+            if (money_cond && draw_cond && !game_info.bases[pid].ant_level) {
+                logger.err("[Upgrading base]");
+                ops.emplace_back(UpgradeGeneratedAnt);
+                avail_money -= LEVEL2_BASE_UPGRADE_PRICE;
+            }
+        }
+
+        int min_avail_money_under_EMP(const GameInfo& game_info, const Defense_operation& my_op) {
+            Simulator op_done{game_info, pid, !pid};
+            op_done.task_list[pid] = my_op.ops;
+            op_done.simulate(my_op.round_needed+1, -1);
+
+            int ans = 1e7;
+            int full = Util::calc_total_value(op_done.info, pid);
+            for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                Pos p{x, y};
+                if (MAP_PROPERTY[x][y] == -1) continue;
+                int residual = full - Util::EMP_banned_money(op_done.info, p, pid);
+                ans = std::min(ans, residual);
+            }
+            return ans;
         }
 
         // 当前可用钱数（计及即将执行操作的钱）
@@ -666,25 +740,17 @@ class AI_ {
             return 120;
         }
 
-        static constexpr int MIN_TOWER_DIST = 4;
-        static constexpr int MIN_TOWER_DIST_EARLY = 5;
         static constexpr int EMP_COVER_PENALTY = 40;
-
-        static constexpr double UPGRADE_COST_MULT = 0.85;
-        static constexpr double LIGHTNING_MULT = 3;
-
-        static constexpr TowerType BUILD_SERIES[][2] = {
-            {TowerType::Quick, TowerType::Sniper}, {TowerType::Quick, TowerType::Double}, {TowerType::Quick, TowerType::QuickPlus},
-            {TowerType::Mortar, TowerType::MortarPlus}, {TowerType::Heavy, TowerType::Cannon}};
-        static constexpr TowerType UPDATE_SERIES[][2] = {{TowerType::Quick, TowerType::Double}, {TowerType::Mortar, TowerType::MortarPlus}};
 
         static constexpr int EMP_HANDLE_THRESH = 5;
         static constexpr int EVA_EMERGENCY_ROUND = 10;
 
         static constexpr int EMP_SIM_ROUND = 20;
-        static constexpr int EMP_REFINE_ROUND = 5;
+        static constexpr int EMP_REFINE_ROUND = 7;
 
         static constexpr int EVA_SIM_ROUND = 10;
+        static constexpr int EVA_REFINE_ROUND = 7;
+
         static constexpr int DFL_SIM_ROUND = 10;
 };
 
