@@ -2,6 +2,7 @@ import os;
 os.chdir(os.path.dirname(__file__));
 
 import pycurl;
+import base64;
 import io, json;
 import datetime;
 
@@ -49,6 +50,8 @@ class Fetcher:
             start_time (datetime.datetime, optional): 给定的起始时间, 晚于该时间发起的对局才会被下载. 默认无限制.
             end_time (datetime.datetime, optional): 给定的结束时间, 早于该时间发起的对局才会被下载. 默认无限制.
         """
+        print("Fetching starts at " + str(datetime.datetime.now()));
+
         search_player : str = player if isinstance(player, str) else player[0];
         another_player : str = "" if isinstance(player, str) else player[1];
 
@@ -151,3 +154,23 @@ class Analyzer:
                         tuple(map(lambda x: "%s %s" % (x["user"]["username"], x["code"]["entity"]), match_json["info"])), match_json["create_time"]));
             if (not matching and delete == -1) or (matching and delete == 1):
                 os.remove(match_file);
+    @staticmethod
+    def scan_result(player : str, ai_name : str = None) -> None:
+        for match_file in Analyzer.get_files():
+            match_json : json_t = json.load(open(match_file));
+
+            for ind, thing in enumerate(match_json["info"]):
+                if (thing is None) or (thing["user"]["username"] != player):
+                    continue;
+                if ai_name and not strs_in_strs(ai_name, thing["code"]["entity"]):
+                    continue;
+
+                msg_json = json.loads(match_json["message"]);
+                msg = base64.b64decode(msg_json["states"][ind]["stderr"]).decode().splitlines();
+                last_msg : str = "";
+                for i in msg:
+                    if i.find("511 HP:") >= 0:
+                        last_msg = i.replace("511 ", "");
+
+                print("Match %d posi%d : %s [%s] at %s" % (thing["match"], ind,
+                    tuple(map(lambda x: "%s %s" % (x["user"]["username"], x["code"]["entity"]), match_json["info"])), last_msg, match_json["create_time"]));
