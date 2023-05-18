@@ -91,6 +91,7 @@ When y is odd:
 static constexpr int OFFSET[2][6][2] = {{{0, 1}, {-1, 0}, {0, -1}, {1, -1}, {1, 0}, {1, 1}},
                                 {{-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, 0}, {0, 1}}};
 
+static int dist_array[MAP_SIZE][MAP_SIZE][MAP_SIZE][MAP_SIZE];
 /**
  * @brief Get the distance between two points on the map (NOT Euclidean distance). 
  * @param x0 The x-coordinate of the first point.
@@ -99,7 +100,7 @@ static constexpr int OFFSET[2][6][2] = {{{0, 1}, {-1, 0}, {0, -1}, {1, -1}, {1, 
  * @param y1 The y-coordinate of the second point.
  * @return The distance between the given points.
  */
-inline int distance(int x0, int y0, int x1, int y1)
+inline int distance_raw(int x0, int y0, int x1, int y1)
 {
     int dy = abs(y0 - y1);
     int dx;
@@ -114,6 +115,15 @@ inline int distance(int x0, int y0, int x1, int y1)
         dx = std::max(0, abs(x0 - x1) - abs(y0 - y1) / 2);
 
     return dx + dy;
+}
+void init_dist_array() {
+    for (int x0 = 0; x0 < MAP_SIZE; x0++) for (int x1 = 0; x1 < MAP_SIZE; x1++)
+        for (int y0 = 0; y0 < MAP_SIZE; y0++) for (int y1 = 0; y1 < MAP_SIZE; y1++) dist_array[x0][y0][x1][y1] = distance_raw(x0, y0, x1, y1);
+}
+
+inline int distance(int x0, int y0, int x1, int y1)
+{
+    return dist_array[x0][y0][x1][y1];
 }
 
 /**

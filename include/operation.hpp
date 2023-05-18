@@ -125,6 +125,10 @@ struct LS_cfg {
 struct EVA_cfg {
     bool available; // 是否允许使用EVA
 };
+// EMP配置类
+struct EMP_cfg {
+    bool available; // 是否允许使用EVA
+};
 
 // “卖出动作序列”
 class Sell_operation {
@@ -215,6 +219,7 @@ class Op_generator {
         Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar, TowerType::Heavy}, {TowerType::Double, TowerType::MortarPlus}};
         LS_cfg ls_cfg = {false};
         EVA_cfg eva_cfg = {false};
+        EMP_cfg emp_cfg = {false};
 
         explicit Op_generator(const GameInfo& info, int pid, int _cash = -1) : info(info), pid(pid), cash(_cash) {
             if (cash == -1) cash = info.coins[pid];
@@ -335,7 +340,7 @@ class Op_generator {
             for (const Defense_operation& bud : build_list) {
                 if (bud.ops.size() > 1) continue; // 如果是build+升级则跳过
                 for (const Defense_operation& upd : upgrade_list) {
-                    if (upd.ops.size() > 1) continue; // 升两级也跳过
+                    if (upd.ops.size() > 2) continue; // 升三级也跳过
 
                     Defense_operation mixed = bud + upd;
                     // 预处理涉及的塔编号
@@ -429,6 +434,35 @@ class Op_generator {
                     }
                 }
             }
+
+            // EMP部分
+            if (emp_cfg.available && info.super_weapon_cd[pid][SuperWeaponType::EmpBlaster] <= 0) {
+                 // 解决EMP子问题
+                Defense_operation emp;
+                emp.cost = 150;
+                emp.ops.emplace_back(EMP_op({0, 0}));
+                for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                    Pos p{x, y};
+                    int banned_money = EMP_banned_money(p, !pid);
+                    if (!is_valid_pos(x, y) || !banned_money) continue;
+
+                    // 刷新准备生成的EMP动作
+                    emp.ops.back().op = EMP_op(p);
+                    emp.loss = -banned_money;
+
+                    // 与Sell部分进行合并，默认不对Sell进行剪枝
+                    for (const Sell_operation& curr_sell : sell_list) {
+                        if (cash + curr_sell.earn < emp.cost) continue;
+
+                        // 将动作添加进列表中，此处假定是拆完了再放EMP
+                        ops.push_back(emp);
+                        Defense_operation& curr = ops.back();
+                        curr.suspend(curr_sell.round_needed);
+                        curr.concat_sell(curr_sell);
+                    }
+                }
+            }
+
         }
 
         // 一系列配置函数
@@ -451,6 +485,10 @@ class Op_generator {
         }
         Op_generator& operator<<(const EVA_cfg& new_eva) {
             eva_cfg = new_eva;
+            return *this;
+        }
+        Op_generator& operator<<(const EMP_cfg& new_emp) {
+            emp_cfg = new_emp;
             return *this;
         }
 
@@ -586,6 +624,23 @@ class Op_generator {
         std::vector<int> EVA_ant(const Pos& pos, int player_id) const {
             std::vector<int> ans;
             for (const Ant& a : info.ants) if (a.player == player_id && distance(a.x, a.y, pos.x, pos.y) <= EVA_RANGE) ans.push_back(a.id);
+            return ans;
+        }
+
+        /**
+         * @brief 计算在给定点释放EMP后，被屏蔽的钱数
+         * @param pos 释放EMP的坐标
+         * @param player_id 被EMP攻击的玩家编号
+         * @return int 被屏蔽的钱数
+         */
+        int EMP_banned_money(const Pos& pos, int player_id) {
+            int ans = 0;
+            int banned_count = 0;
+            for (const Tower& t : info.towers) {
+                if (t.player != player_id || distance(t.x, t.y, pos.x, pos.y) > EMP_RANGE) continue;
+                banned_count++;
+                ans += TOWER_REFUND[banned_count] + LEVEL_REFUND[t.level()];
+            }
             return ans;
         }
 

@@ -131,6 +131,9 @@ class AI_ {
         void run_ai() {
             Controller c;
             std::vector<Operation> _opponent_op; // 对手上一次的行动，仅在保证其值正确的时候传递给ai_call_routine
+
+            // 初始化距离数组
+            init_dist_array(); 
             while (true) {
                 if (c.self_player_id == 0) { // Game process when you are player 0
                     // AI makes decisions
@@ -409,6 +412,7 @@ class AI_ {
             if (reflecting_EMP_countdown > 0) situation_log += str_wrap(", try to EMP: %d", reflecting_EMP_countdown);
             logger.err(situation_log);
 
+            int atk_start_time = Simulator::round_count;
             if (game_info.round >= 12) {
                 if (aware_status) { // 如果啥事不干基地会扣血
                     // 搜索：（拆除+）建塔/升级
@@ -532,7 +536,6 @@ class AI_ {
             // 进攻搜索：EVA
             // 总体思想：尽量2~3回合内打到对面基地，减少对方反应时间
             int last_atk = game_info.round - last_attack_round;
-            int atk_start_time = Simulator::round_count;
             Operation_list EVA_raw({}, EVA_SIM_ROUND, -1), best_EVA(EVA_raw);
             constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion);
 
@@ -633,25 +636,37 @@ class AI_ {
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
             bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 200);
             if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_money >= 150) if (raw_f_succ >= 40 || reflect_tag) {
-                for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
-                    Pos p{x, y};
-                    if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
+                Op_generator EMP_gen(game_info, pid, avail_money);
+                EMP_gen << Sell_cfg{2, 3} << Build_cfg{false} << Upgrade_cfg{0} << EMP_cfg{true};
+                EMP_gen.generate_operations();
 
-                    if (Simulator::round_count - atk_start_time > 180000) {// 硬卡时间
+                for (const Defense_operation& EMP_list : EMP_gen.ops) {
+                    if (Simulator::round_count - atk_start_time > 170000) {// 硬卡时间
                         logger.err("[w] EMP search time out");
                         break;
                     }
+                    if (game_info.round + EMP_list.round_needed >= MAX_ROUND) continue;
 
-                    Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -Util::EMP_banned_money(p, !pid));
-                    opl.atk_side = pid;
+                    Operation_list opl({}, -1, EMP_list.loss, EMP_list.cost);
+                    opl.ops = EMP_list.ops;
+                    opl.evaluate(25); // 用于判定拆完塔之后是不是安全的
 
-                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
+                    // 进攻效果判据
                     bool dmg_cond = opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2;
                     bool old_cond = opl.res.old_opp > EMP_raw.res.old_opp;
-                    if (reflect_tag || dmg_cond || old_cond) if (EMP_economy_crit || min_avail >= 160) { // 部分经济要求下放到这里
+                    if (!reflect_tag && !dmg_cond && !old_cond) continue;
+
+                    // 防守要求判据
+                    if (opl.res.first_succ < MAX_ROUND) continue;
+
+                    // 部分经济要求判据
+                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
+                    if (EMP_economy_crit || min_avail >= 160) {
                         // 模拟对方防守
                         Simulator raw_sim(game_info, pid, pid);
-                        raw_sim.task_list[pid].emplace_back(EMP_op(p));
+                        raw_sim.step_simulation(EMP_list.round_needed);
+                        raw_sim.task_list[pid].emplace_back(EMP_list.ops.back()); // 对对方而言，我方是否Sell塔并不是很重要
+                        raw_sim.info.coins[pid] = 999; // 所以作点弊也没关系...
                         raw_sim.step_to_next_player();
 
                         Op_generator generator(raw_sim.info, !pid);
