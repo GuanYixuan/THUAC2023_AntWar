@@ -276,6 +276,15 @@ class AI_ {
             if (banned_tower_value[!pid]) disp += str_wrap(" + %dU", banned_tower_value[!pid]);
             logger.err(disp + ')');
 
+            // SuperWeapon log
+            if (game_info.super_weapons.size()) {
+                std::string sup_disp("Active super weapon:");
+                for (const SuperWeapon& s : game_info.super_weapons)
+                    sup_disp += str_wrap(" [id:%d, remain:%d, player%d at (%d, %d)]", s.type, s.left_time, s.player, s.x, s.y);
+                logger.err(sup_disp);
+            }
+
+
             // 模拟检查
             ai_simulation_checker_pre(game_info, opponent_op);
 
@@ -293,8 +302,16 @@ class AI_ {
             // 操作重排序
             std::sort(ops.begin(), ops.end(), [](const Operation& a, const Operation& b){return a.type == DowngradeTower && b.type != DowngradeTower;});
 
-            // Simulator log
-            logger.err("Sim:%d Round:%d", Simulator::sim_count - last_sim_count, Simulator::round_count - last_round_count);
+            // Simulator/Ant log
+            int max_age = -1;
+            const Ant* oldest = NULL;
+            for (const Ant& a : game_info.ants) if (a.player == pid && a.age > max_age) {
+                oldest = &a;
+                max_age = a.age;
+            }
+
+            logger.err("Sim:%d Round:%d,  Max age %d %s",
+                Simulator::sim_count - last_sim_count, Simulator::round_count - last_round_count, max_age, oldest ? oldest->str(true).c_str() : "");
             last_sim_count = Simulator::sim_count;
             last_round_count = Simulator::round_count;
 
@@ -505,7 +522,10 @@ class AI_ {
             if (best_result.ops.size()) { // 实施搜索结果
                 logger.err("best: " + best_result.defence_str());
 
-                if (peace_check) peace_check_cd = 30;
+                if (peace_check) {
+                    if (enemy_base_level) peace_check_cd = 30;
+                    else peace_check_cd = 20;
+                }
 
                 bool occupying_LS = EMP_active && best_result.res.first_succ <= raw_f_succ + 20
                     && (avail_money + tower_value[pid] > 150 && avail_money + tower_value[pid] - best_result.cost <= 150)
@@ -525,6 +545,9 @@ class AI_ {
                 }
                 return;
             }
+
+            // 是否进入到“卷击杀数”的状态
+            bool consider_old = (game_info.bases[pid].hp == game_info.bases[!pid].hp) && (ants_killed[pid] < ants_killed[!pid] + 3);
 
             // 进攻搜索：EVA
             // 总体思想：尽量2~3回合内打到对面基地，减少对方反应时间
@@ -546,10 +569,13 @@ class AI_ {
                     Operation_list opl({EVA_op(p)}, EVA_SIM_ROUND, -curr.size());
                     opl.atk_side = pid;
 
-                    if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt) continue;
+                    // 进攻效果判据
+                    bool old_cond = opl.res.old_opp > EVA_raw.res.old_opp;
+                    if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt || old_cond) continue;
 
-                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops});
-                    if (!(EVA_economy_crit || min_avail >= 160)) continue; // 部分经济要求下放到这里
+                    // 部分经济要求判据
+                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
+                    if (!(EVA_economy_crit || min_avail >= 160)) continue;
 
                     // 模拟对方防守
                     Simulator raw_sim(game_info, pid, pid);
@@ -560,11 +586,13 @@ class AI_ {
                     generator.generate_operations();
 
                     bool defended = false;
+                    bool old_defended = false;
                     for (const Defense_operation& op_list : generator.ops) {
                         Simulator atk_sim(raw_sim.info, !pid, pid);
                         atk_sim.task_list[!pid] = op_list.ops;
                         Sim_result res = atk_sim.simulate(EVA_SIM_ROUND, EVA_SIM_ROUND);
 
+                        if (res.old_opp < opl.res.old_opp) old_defended = true;
                         if (res.first_succ > EVA_SIM_ROUND || res.succ_ant < EVA_raw.res.dmg_dealt) {
                             defended = true;
                             logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
@@ -574,7 +602,10 @@ class AI_ {
                     // 如果（对方）未找到解，则更新答案
                     if (!defended) {
                         logger.err("Not solved EVA %s", opl.attack_str().c_str());
-                        if (opl.attack_better_than(best_EVA)) best_EVA = opl;
+                        if (opl.attack_better_than(best_EVA, consider_old)) best_EVA = opl;
+                    } else if (consider_old && old_cond && !old_defended) {
+                        logger.err("EVA attack for old %s", opl.attack_str().c_str());
+                        if (opl.attack_better_than(best_EVA, consider_old)) best_EVA = opl;
                     }
                 }
 
@@ -589,7 +620,7 @@ class AI_ {
                         best_refine.evaluate(EVA_SIM_ROUND);
                         best_refine.res.dmg_time -= i; // 对模拟i回合的补偿
                         logger.err("EVA refine: %s", best_refine.attack_str().c_str());
-                        if (best_refine.attack_better_than(best_EVA)) local_best = false;
+                        if (best_refine.attack_better_than(best_EVA, consider_old)) local_best = false;
                     }
 
                     if (local_best) {
@@ -608,7 +639,8 @@ class AI_ {
 
             bool reflect_tag = reflecting_EMP_countdown >= 0;
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
-            bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 250) || (game_info.coins[!pid] < 150 && avail_money >= 210);
+            bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 200);
+            // bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 250) || (game_info.coins[!pid] < 150 && avail_money >= 210);
             if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_money >= 150) if (raw_f_succ >= 40 || reflect_tag) {
                 for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
@@ -617,8 +649,10 @@ class AI_ {
                     Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -Util::EMP_banned_money(p, !pid));
                     opl.atk_side = pid;
 
-                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops});
-                    if (reflect_tag || (opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2)) if (EMP_economy_crit || min_avail >= 160) { // 部分经济要求下放到这里
+                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
+                    bool dmg_cond = opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2;
+                    bool old_cond = opl.res.old_opp > EMP_raw.res.old_opp;
+                    if (reflect_tag || dmg_cond || old_cond) if (EMP_economy_crit || min_avail >= 160) { // 部分经济要求下放到这里
                         // 模拟对方防守
                         Simulator raw_sim(game_info, pid, pid);
                         raw_sim.task_list[pid].emplace_back(EMP_op(p));
@@ -630,6 +664,7 @@ class AI_ {
 
                         bool ls_defended = false;
                         bool build_defended = false;
+                        bool old_defended = false;
                         for (const Defense_operation& op_list : generator.ops) {
                             if (ls_defended && op_list.has_ls()) continue;
 
@@ -637,6 +672,7 @@ class AI_ {
                             atk_sim.task_list[!pid] = op_list.ops;
                             Sim_result res = atk_sim.simulate(EMP_SIM_ROUND, EMP_SIM_ROUND);
 
+                            if (res.old_opp < opl.res.old_opp) old_defended = true;
                             if (res.first_succ > EMP_SIM_ROUND || res.succ_ant < EMP_raw.res.dmg_dealt) {
                                 if (!op_list.has_ls()) build_defended = true;
                                 else ls_defended = true;
@@ -645,22 +681,19 @@ class AI_ {
                             }
                         }
 
-                        if (reflect_tag && opl.attack_better_than(best_EMP)) {
+                        if (reflect_tag && opl.attack_better_than(best_EMP, consider_old)) {
                             logger.err("Possible reflect EMP %s", opl.attack_str().c_str());
                             best_EMP = opl;
-                        }
-
-                        if (ls_defended && !build_defended) {
+                        } else if (ls_defended && !build_defended) { // （对方）只找到LS解
                             logger.err("%s solved by LS", opl.attack_str().c_str());
-                            if (opl.attack_better_than(best_EMP)) best_EMP = opl;
-                        }
-
-                        // 如果（对方）未找到解，则更新答案
-                        if (!ls_defended && !build_defended) {
+                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
+                        } else if (!ls_defended && !build_defended) { // （对方）未找到解
                             logger.err("Not solved EMP %s", opl.attack_str().c_str());
-
                             opl.res.dmg_dealt += 100; // 标记为“不可解”
-                            if (opl.attack_better_than(best_EMP)) best_EMP = opl;
+                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
+                        } else if (consider_old && old_cond && !old_defended) { // 未找到“防止老死”的解
+                            logger.err("EMP Attack for old %s", opl.attack_str().c_str());
+                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
                         }
                     }
                 }
@@ -669,7 +702,7 @@ class AI_ {
                 bool unsolved_trigger = (best_EMP.res.dmg_dealt > 100);
                 bool force_ls_trigger = (avail_value[pid] - avail_value[!pid] >= 150);
                 force_ls_trigger |= (avail_money >= 250 && avail_value[pid] >= 300);
-                if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger || (reflect_limit > 0))) {
+                if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger || reflect_tag)) {
                     // 不可解，或己方经济有优势时挤压对方
                     std::string pr;
                     if (reflect_limit > 0) pr += "(Reflect)";
@@ -686,7 +719,7 @@ class AI_ {
                         best_refine.res.dmg_time -= i; // 对模拟i回合的补偿
                         if (unsolved_trigger) best_refine.res.dmg_dealt += 100;
                         logger.err("EMP refine: %s", best_refine.attack_str().c_str());
-                        if (best_refine.attack_better_than(best_EMP)) local_best = false;
+                        if (best_refine.attack_better_than(best_EMP, consider_old)) local_best = false;
                     }
 
                     if (local_best || reflect_tag) {

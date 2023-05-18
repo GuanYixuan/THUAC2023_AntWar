@@ -14,12 +14,13 @@ struct Sim_result {
 
     int dmg_dealt; // 模拟过程中对方掉的血
     int dmg_time; // 模拟过程中对方第一次掉血的回合数（相对时间）
-
+    int old_opp; // 我方老死的蚂蚁数
+    int next_old_opp; // 我方第一个蚂蚁老死的回合数（相对时间）
 
     bool early_stop; // 这一模拟结果是否是提前停止而得出的
 
     constexpr Sim_result() : succ_ant(99), first_succ(0), danger_encounter(99), first_enc(0),
-        old_ant(99), next_old(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1), early_stop(false) {}
+        old_ant(99), next_old(0), dmg_dealt(0), dmg_time(MAX_ROUND + 1), old_opp(0), next_old_opp(MAX_ROUND + 1), early_stop(false) {}
 };
 
 // 模拟器类
@@ -132,6 +133,9 @@ public:
 
         res.old_ant = old_ants[pid];
         if (res.old_ant) res.next_old = next_old[pid] - start_round;
+        res.old_opp = old_ants[!pid];
+        if (res.old_opp) res.next_old_opp = next_old[!pid] - start_round;
+
         res.danger_encounter = enc_ant_id.size();
         res.succ_ant = INIT_HEALTH - info.bases[pid].hp;
         res.dmg_dealt = INIT_HEALTH - info.bases[!pid].hp;
@@ -257,7 +261,14 @@ public:
         // 1) count down long-lasting weapons' left-time
         info.count_down_super_weapons_left_time(player_id);
         // 2) apply opponent's operations
-        for (auto& op: operations[player_id]) info.apply_operation(player_id, op);
+        for (auto& op: operations[player_id]) {
+            if (!info.is_operation_valid(player_id, op)) {
+                fprintf(stderr, "[w] Adding invalid operation for player %d: %s\n", player_id, op.str(true).c_str());
+                std::string enemy_op = "full op list:";
+                for (const Operation& op : operations[player_id]) enemy_op += ' ' + op.str(true);
+                fprintf(stderr, (enemy_op + '\n').c_str());
+            } else info.apply_operation(player_id, op);
+        }
     }
 
     /**

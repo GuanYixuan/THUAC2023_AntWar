@@ -480,6 +480,10 @@ struct GameInfo
             case DowngradeTower:
             {
                 auto t = tower_of_id(op.arg0);
+                if (!t) {
+                    fprintf(stderr, "Tower unfound when getting income for %s\n", op.str(true).c_str());
+                    assert(false);
+                }
                 if (t.value().type == TowerType::Basic) // To be destroyed
                     return destroy_tower_income(tower_num_of_player(player_id));
                 else // To be downgraded
@@ -520,6 +524,10 @@ struct GameInfo
             case OperationType::DowngradeTower:
             {
                 auto t = tower_of_id(op.arg0);
+                if (!t) {
+                    fprintf(stderr, "Tower unfound when checking %s\n", op.str(true).c_str());
+                    assert(false);
+                }
                 if (t.value().type == TowerType::Basic) // To be destroyed
                     income += destroy_tower_income(tower_num--);
                 else // To be downgraded

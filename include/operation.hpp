@@ -50,7 +50,7 @@ class Operation_list {
         return ret + ']';
     }
     std::string attack_str() const {
-        std::string ret = str_wrap("[dmg: %d, f: %2d, l: %3d] [", res.dmg_dealt, res.dmg_time, loss);
+        std::string ret = str_wrap("[dmg/old: %d/%d, f/o: %2d/%d, l: %3d] [", res.dmg_dealt, res.old_opp, res.dmg_time, res.next_old_opp, loss);
         for (const Task& task : ops) {
             ret += task.op.str();
             if (task.round) ret += str_wrap("(+%d)", task.round);
@@ -78,11 +78,16 @@ class Operation_list {
      * @brief 比较当前行动序列与另一行动序列在“进攻”方面的表现
      * @note 比较优先级：对敌方造成的伤害、行动开销
      * @param other 要比较的另一行动序列
+     * @param is_old_significant 是否考虑对击杀数的影响
      * @return bool 当前行动序列在“进攻”方面是否优于other
      */
-    bool attack_better_than(const Operation_list& other) const {
+    bool attack_better_than(const Operation_list& other, bool is_old_significant) const {
         int s_score = res.dmg_dealt - res.dmg_time + (res.dmg_time <= 4);
         int o_score = other.res.dmg_dealt - other.res.dmg_time + (res.dmg_time <= 4);
+        if (is_old_significant) {
+            s_score += res.old_opp - res.next_old_opp + (res.next_old_opp <= 4);
+            o_score += other.res.old_opp - other.res.next_old_opp + (other.res.next_old_opp <= 4);
+        }
         if (s_score != o_score) return s_score > o_score;
         return loss < other.loss;
     }
