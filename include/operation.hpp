@@ -244,7 +244,7 @@ class Op_generator {
             // 解决build子问题
             build_list.clear();
             if (build.available) for (const Pos& p : highlands[pid]) {
-                if (info.tower_at(p.x, p.y) || info.is_shielded_by_emp(pid, p.x, p.y)) continue; // 已经建了塔的地方就不必再建了
+                if (info.tower_at(p.x, p.y).has_value() || info.is_shielded_by_emp(pid, p.x, p.y)) continue; // 已经建了塔的地方就不必再建了
                 // 1级
                 temp_build.clear();
                 temp_build.ops.emplace_back(build_op(p));
@@ -323,6 +323,46 @@ class Op_generator {
                     Defense_operation& curr = ops.back();
                     curr.suspend(curr_sell.round_needed);
                     curr.concat_sell(curr_sell, sell.tweaking ? TWEAK_LOSS_MULT : 1);
+                }
+            }
+
+            // build(x1) + upgrade(x1)部分
+            for (const Defense_operation& bud : build_list) {
+                if (bud.ops.size() > 1) continue; // 如果是build+升级则跳过
+                for (const Defense_operation& upd : upgrade_list) {
+                    if (upd.ops.size() > 1) continue; // 升两级也跳过
+
+                    Defense_operation mixed = bud + upd;
+                    // 预处理涉及的塔编号
+                    std::vector<int> tower_ids;
+                    for (const Task& t : upd.ops) tower_ids.push_back(t.op.arg0);
+
+                    int first_larger_earn = -1;
+                    for (const Sell_operation& curr_sell : sell_list) {
+                        if (first_larger_earn < 0 && curr_sell.earn + cash >= mixed.cost) first_larger_earn = curr_sell.earn;
+                        if (first_larger_earn >= 0 && curr_sell.earn > first_larger_earn && !sell.tweaking) break;
+
+                        // 计算由拆除引发的开销变化
+                        int real_cost = mixed.cost;
+                        int real_loss = mixed.loss;
+                        if (curr_sell.destroy) {
+                            real_cost = real_cost + BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1];
+                            real_loss = real_loss + (BUILD_COST[tower_count+1-curr_sell.destroy] - BUILD_COST[tower_count+1]) / BUILD_LOSS_DIV;
+                        }
+                        if (cash + curr_sell.earn < real_cost) continue;
+
+                        // 检查塔编号是否冲突（不允许在动作序列中降级+升级同一个塔）
+                        bool conflict = false;
+                        for (int i = 0; i < curr_sell.ops.size() && !conflict; i++) conflict |= std::count(tower_ids.begin(), tower_ids.end(), curr_sell.ops[i].op.arg0);
+                        if (conflict) continue;
+
+                        // 将动作添加进列表中，此处假定是拆完了再开始建
+                        ops.push_back(mixed);
+                        Defense_operation& curr = ops.back();
+                        curr.cost = real_cost, curr.loss = real_loss;
+                        curr.suspend(curr_sell.round_needed);
+                        curr.concat_sell(curr_sell, sell.tweaking ? TWEAK_LOSS_MULT : 1);
+                    }
                 }
             }
 
