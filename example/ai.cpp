@@ -72,17 +72,6 @@ class Util {
     }
 
     /**
-     * @brief 获取在给定点释放EVA后，添加护盾的蚂蚁编号
-     * @param pos 释放EVA的坐标
-     * @param player_id 【释放EVA】的玩家编号
-     * @return std::vector<int> 添加护盾的蚂蚁编号列表
-     */
-    static std::vector<int> EVA_ant(const Pos& pos, int player_id) {
-        std::vector<int> ans;
-        for (const Ant& a : info->ants) if (a.player == player_id && distance(a.x, a.y, pos.x, pos.y) <= EVA_RANGE) ans.push_back(a.id);
-        return ans;
-    }
-    /**
      * @brief 计算在给定点释放EMP后，被屏蔽的塔数量
      * @param pos 释放EMP的坐标
      * @param player_id 被EMP攻击的玩家编号
@@ -90,20 +79,6 @@ class Util {
      */
     static int EMP_tower_count(const Pos& pos, int player_id) {
         return std::count_if(info->towers.begin(), info->towers.end(), [&](const Tower& t){ return t.player == player_id && distance(t.x, t.y, pos.x, pos.y) <= EMP_RANGE; });
-    }
-    /**
-     * @brief 判断是否存在一个EMP释放点能够覆盖所有塔，可以选择添加一个塔坐标
-     * @param player_id 被EMP攻击的玩家编号
-     * @param pos 新建塔的坐标
-     * @return int 被屏蔽的高地面积
-     */
-    static bool EMP_cover_all(int player_id, std::optional<Pos> pos = {}) {
-        std::vector<Pos> tower_pos;
-        if (pos) tower_pos.push_back(pos.value());
-        for (const Tower& t : info->towers) if (t.player == player_id) tower_pos.push_back({t.x, t.y});
-        for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++)
-            if (is_valid_pos(x, y) && std::all_of(tower_pos.begin(), tower_pos.end(), [&](const Pos& p){return p.dist_to(x, y) <= EMP_RANGE;})) return true;
-        return false;
     }
     /**
      * @brief 计算在给定点释放EMP后，被屏蔽的钱数
@@ -204,7 +179,7 @@ class AI_ {
                 }
             }
         }
-        // 预处理模块：覆盖错误的Tower::cd以及Base::level
+        // 预处理模块：覆盖错误的Tower::cd
         void pre_fix_cd(const Simulator& fixer, GameInfo& incorrect) {
             bool id_same = true;
             const std::vector<Tower>& correct_tower = fixer.info.towers;
@@ -220,8 +195,6 @@ class AI_ {
                 logger.err(msg + "}");
             }
             for (int i = 0, lim = correct_tower.size(); i < lim; i++) editing_tower[i].cd = correct_tower[i].cd;
-            // Base::level
-            // for (int i = 0; i < 2; i++) incorrect.bases[i].ant_level = fixer.info.bases[i].ant_level;
         }
         // 预处理模块：覆盖错误的Ant::evasion
         void pre_fix_evasion(const Simulator& fixer, GameInfo& incorrect) {
@@ -417,8 +390,11 @@ class AI_ {
             bool peace_check = (avail_money >= 130 || avail_value[pid] >= 250) && (raw_f_succ >= 40);
             peace_check &= (raw_result.res.next_old <= 20 && game_info.bases[pid].hp >= game_info.bases[!pid].hp) || (raw_result.res.first_enc <= 20);
 
+            bool hp_draw = (game_info.bases[pid].hp == game_info.bases[!pid].hp); // 血量是否打平
+
             int enemy_base_level = game_info.bases[!pid].ant_level;
-            peace_check &= (enemy_base_level < 2) && (peace_check_cd <= 0);
+            peace_check &= (enemy_base_level < 2);
+            peace_check &= (peace_check_cd <= 0) || (game_info.round >= 500);
             peace_check_cd--;
 
             // situation log
@@ -481,11 +457,16 @@ class AI_ {
                         }
                     }
                 } else if (peace_check) { // 和平时期检查
+                    // 是否需要承接末期LS的使命
+                    bool no_ls = (avail_value[pid] < 130) || (game_info.round + game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] >= MAX_ROUND);
+
                     // 搜索：（拆除+）建塔/升级
                     Op_generator build_gen(game_info, pid, avail_money);
                     build_gen.sell.tweaking = true;
-                    build_gen.build.lv3_options.clear();
-                    build_gen.upgrade.max_count = 1;
+                    if (game_info.round <= 493 || !no_ls) {
+                        build_gen.build.lv3_options.clear();
+                        build_gen.upgrade.max_count = 1;
+                    }
                     build_gen.generate_operations();
 
                     for (const Defense_operation& op_list : build_gen.ops) {
@@ -495,8 +476,8 @@ class AI_ {
                         for (const Task& t : op_list.ops) if (t.op.type == OperationType::BuildTower) build_pos = {t.op.arg0, t.op.arg1};
                         assert(!build_pos || is_highland(pid, build_pos.value().x, build_pos.value().y));
 
-                        if (game_info.round <= 480 && op_list.cost > 60) continue;
-                        if (game_info.round > 480 && op_list.cost > 120) continue;
+                        if (game_info.round <= 493 && op_list.cost > 60) continue;
+                        if (game_info.round > 493 && op_list.cost > 120 && !no_ls) continue;
 
                         Operation_list opl({}, -1, op_list.loss, op_list.cost, !pid);
                         opl.ops = op_list.ops;
@@ -551,34 +532,43 @@ class AI_ {
             // 进攻搜索：EVA
             // 总体思想：尽量2~3回合内打到对面基地，减少对方反应时间
             int last_atk = game_info.round - last_attack_round;
+            int atk_start_time = Simulator::round_count;
             Operation_list EVA_raw({}, EVA_SIM_ROUND, -1), best_EVA(EVA_raw);
             constexpr SuperWeaponType EVA(SuperWeaponType::EmergencyEvasion);
 
             bool EVA_economy_crit = (avail_money >= 210) || (game_info.coins[!pid] <= 130 && avail_money >= 160 + 50 * game_info.bases[!pid].ant_level);
-            if (game_info.super_weapon_cd[pid][EVA] <= 0 && last_atk > 5 && avail_money >= 100) if (raw_f_succ >= 30) {
-                std::vector<std::vector<int>> scaned;
-                if (game_info.super_weapon_cd[pid][EVA] <= 0) for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
-                    Pos p{x, y};
-                    if (MAP_PROPERTY[x][y] == -1) continue;
+            if (game_info.super_weapon_cd[pid][EVA] <= 0 && last_atk > 5 && avail_value[pid] >= 150) if (raw_f_succ >= 30) {
+                Op_generator EVA_gen(game_info, pid, avail_money);
+                EVA_gen << Sell_cfg{3, 3} << Build_cfg{false} << Upgrade_cfg{0} << EVA_cfg{true};
+                EVA_gen.generate_operations();
 
-                    std::vector<int> curr(Util::EVA_ant(p, pid));
-                    if (!curr.size() || std::count(scaned.begin(), scaned.end(), curr)) continue;
-                    scaned.push_back(curr);
+                for (const Defense_operation& EVA_list : EVA_gen.ops) {
+                    if (Simulator::round_count - atk_start_time > 160000) {// 硬卡时间
+                        logger.err("[w] EVA search time out");
+                        break;
+                    }
+                    if (game_info.round + EVA_list.round_needed >= MAX_ROUND) continue;
 
-                    Operation_list opl({EVA_op(p)}, EVA_SIM_ROUND, -curr.size());
-                    opl.atk_side = pid;
+                    Operation_list opl({}, -1, EVA_list.loss, EVA_list.cost);
+                    opl.ops = EVA_list.ops;
+                    opl.evaluate(20); // 用于判定拆完塔之后是不是安全的
 
                     // 进攻效果判据
-                    bool old_cond = opl.res.old_opp > EVA_raw.res.old_opp;
-                    if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt || old_cond) continue;
+                    bool old_cond = hp_draw && (opl.res.old_opp > EVA_raw.res.old_opp);
+                    if (opl.res.dmg_dealt <= EVA_raw.res.dmg_dealt && !old_cond) continue;
+
+                    // 防守要求判据
+                    if (opl.res.first_succ < MAX_ROUND) continue;
 
                     // 部分经济要求判据
-                    int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
+                    int min_avail = min_avail_money_under_EMP(game_info, EVA_list) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
                     if (!(EVA_economy_crit || min_avail >= 160)) continue;
 
                     // 模拟对方防守
                     Simulator raw_sim(game_info, pid, pid);
-                    raw_sim.task_list[pid].emplace_back(EVA_op(p));
+                    raw_sim.step_simulation(EVA_list.round_needed);
+                    raw_sim.task_list[pid].emplace_back(EVA_list.ops.back()); // 对对方而言，我方是否Sell塔并不是很重要
+                    raw_sim.info.coins[pid] = 999; // 所以作点弊也没关系...
                     raw_sim.step_to_next_player();
 
                     Op_generator generator(raw_sim.info, !pid);
@@ -594,7 +584,7 @@ class AI_ {
                         if (res.old_opp < opl.res.old_opp) old_defended = true;
                         if (res.first_succ > EVA_SIM_ROUND || res.succ_ant < EVA_raw.res.dmg_dealt) {
                             defended = true;
-                            logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
+                            // logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
                             break;
                         }
                     }
@@ -607,6 +597,7 @@ class AI_ {
                         if (opl.attack_better_than(best_EVA, consider_old)) best_EVA = opl;
                     }
                 }
+                logger.err("raw best_EVA: %s (scanned %d)", best_EVA.attack_str().c_str(), EVA_gen.ops.size());
 
                 bool fast_EVA_trigger = (best_EVA.res.dmg_time <= 5);
                 if (best_EVA.res.dmg_dealt > EVA_raw.res.dmg_dealt && fast_EVA_trigger) {
@@ -615,7 +606,7 @@ class AI_ {
                     bool local_best = true;
                     Operation_list best_refine(best_EVA);
                     for (int i = 1; i <= EVA_REFINE_ROUND && local_best; i++) {
-                        best_refine.ops.front().round = i;
+                        best_refine.ops.back().round = i;
                         best_refine.evaluate(EVA_SIM_ROUND);
                         best_refine.res.dmg_time -= i; // 对模拟i回合的补偿
                         logger.err("EVA refine: %s", best_refine.attack_str().c_str());
@@ -624,9 +615,10 @@ class AI_ {
 
                     if (local_best) {
                         logger.err("Conduct EVA attack " + best_EVA.attack_str());
-                        ops.push_back(best_EVA.ops.front().op);
-                        avail_money -= SUPER_WEAPON_INFO[EVA][3];
-                        last_atk = game_info.round;
+                        append_task_list(game_info, best_EVA.ops);
+                        avail_money -= best_EVA.cost;
+                        last_attack_round = game_info.round;
+                        last_atk = 0;
                     }
                 }
             }
@@ -640,11 +632,15 @@ class AI_ {
             bool reflect_tag = reflecting_EMP_countdown >= 0;
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
             bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 200);
-            // bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 250) || (game_info.coins[!pid] < 150 && avail_money >= 210);
             if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_money >= 150) if (raw_f_succ >= 40 || reflect_tag) {
                 for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
                     Pos p{x, y};
                     if (MAP_PROPERTY[x][y] == -1 || !Util::EMP_tower_count(p, !pid)) continue;
+
+                    if (Simulator::round_count - atk_start_time > 180000) {// 硬卡时间
+                        logger.err("[w] EMP search time out");
+                        break;
+                    }
 
                     Operation_list opl({EMP_op(p)}, EMP_SIM_ROUND, -Util::EMP_banned_money(p, !pid));
                     opl.atk_side = pid;
@@ -726,7 +722,7 @@ class AI_ {
                         logger.err(pr + " Conduct EMP attack " + best_EMP.attack_str());
                         ops.push_back(best_EMP.ops.front().op);
                         avail_money -= SUPER_WEAPON_INFO[EB][3];
-                        last_atk = game_info.round;
+                        last_attack_round = game_info.round;
 
                         if (reflect_tag) reflecting_EMP_countdown = 0;
                     }
@@ -739,7 +735,7 @@ class AI_ {
             bool draw_cond = (game_info.bases[pid].hp <= game_info.bases[!pid].hp) && (ants_killed[pid] <= ants_killed[!pid]);
             bool money_cond = (avail_money >= 200 + 50 * base_level) && (avail_value[pid] >= 300 + 50 * base_level) && (base_level < 2);
             if (money_cond) money_cond &= (min_avail_money_under_EMP(game_info, {{Task(Operation(UpgradeGeneratedAnt))}}) >= 150);
-            if (game_info.round < 500 && draw_cond && money_cond && !ops.size()) {
+            if (game_info.round < 480 && draw_cond && money_cond && !ops.size()) {
                 logger.err("[Upgrading base]");
                 ops.emplace_back(UpgradeGeneratedAnt);
                 avail_money -= LEVEL2_BASE_UPGRADE_PRICE;
@@ -750,7 +746,7 @@ class AI_ {
             Operation_list final_LS_raw({}, sim_round), best_final_LS(final_LS_raw);
             constexpr SuperWeaponType LS(SuperWeaponType::LightningStorm);
             constexpr int LS_cost = SUPER_WEAPON_INFO[LS][3];
-            if (game_info.round >= 505 && game_info.super_weapon_cd[pid][LS] <= 0) {
+            if (hp_draw && game_info.round >= 505 && game_info.super_weapon_cd[pid][LS] <= 0) {
                 Op_generator gen(game_info, pid, avail_money);
                 gen << Sell_cfg{3, 3} << Build_cfg{false} << Upgrade_cfg{0} << LS_cfg{true};
                 gen.generate_operations();

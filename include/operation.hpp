@@ -121,6 +121,10 @@ struct Upgrade_cfg {
 struct LS_cfg {
     bool available; // 是否允许使用闪电风暴
 };
+// EVA配置类
+struct EVA_cfg {
+    bool available; // 是否允许使用EVA
+};
 
 // “卖出动作序列”
 class Sell_operation {
@@ -148,7 +152,7 @@ class Sell_operation {
             return earn < need;
         }
 };
-// “防御动作序列”，日后将会代替Operation_list
+// 所谓“防御动作序列”，但事实上也可以进攻...
 class Defense_operation {
     public:
         std::vector<Task> ops; // 该序列中的系列操作
@@ -199,7 +203,7 @@ class Defense_operation {
         }
 };
 
-// （专门用于防御的）“动作序列生成器”
+// （不见得专门用于防御的）“动作序列生成器”
 class Op_generator {
     public:
         int pid;
@@ -210,6 +214,7 @@ class Op_generator {
         Build_cfg build = {true, {TowerType::Quick, TowerType::Mortar, TowerType::Heavy}, {TowerType::Double, TowerType::Sniper, TowerType::MortarPlus, TowerType::Cannon}};
         Upgrade_cfg upgrade = {2, {TowerType::Quick, TowerType::Mortar, TowerType::Heavy}, {TowerType::Double, TowerType::MortarPlus}};
         LS_cfg ls_cfg = {false};
+        EVA_cfg eva_cfg = {false};
 
         explicit Op_generator(const GameInfo& info, int pid, int _cash = -1) : info(info), pid(pid), cash(_cash) {
             if (cash == -1) cash = info.coins[pid];
@@ -376,7 +381,7 @@ class Op_generator {
                     if (!is_valid_pos(x, y)) continue;
                     ls.ops.back().op = lightning_op({x, y});
 
-                    // 与Sell部分进行合并
+                    // 与Sell部分进行合并，暂时对Sell进行剪枝
                     int first_larger_earn = -1;
                     for (const Sell_operation& curr_sell : sell_list) {
                         if (cash + curr_sell.earn < ls.cost) continue;
@@ -385,6 +390,39 @@ class Op_generator {
 
                         // 将动作添加进列表中，此处假定是拆完了再放LS
                         ops.push_back(ls);
+                        Defense_operation& curr = ops.back();
+                        curr.suspend(curr_sell.round_needed);
+                        curr.concat_sell(curr_sell);
+                    }
+                }
+            }
+
+            // EVA部分
+            if (eva_cfg.available && info.super_weapon_cd[pid][SuperWeaponType::EmergencyEvasion] <= 0) {
+                std::vector<std::vector<int>> scaned; // 已扫描列表
+                 // 解决EVA子问题
+                Defense_operation eva;
+                eva.cost = 100;
+                eva.ops.emplace_back(EVA_op({0, 0}));
+                for (int x = 0; x < MAP_SIZE; x++) for (int y = 0; y < MAP_SIZE; y++) {
+                    Pos p{x, y};
+                    if (!is_valid_pos(x, y)) continue;
+
+                    // 检查ant是否重复
+                    std::vector<int> curr(EVA_ant(p, pid));
+                    if (!curr.size() || std::count(scaned.begin(), scaned.end(), curr)) continue;
+                    scaned.push_back(curr);
+
+                    // 刷新准备生成的EVA动作
+                    eva.ops.back().op = EVA_op(p);
+                    eva.loss = -curr.size();
+
+                    // 与Sell部分进行合并，默认不对Sell进行剪枝
+                    for (const Sell_operation& curr_sell : sell_list) {
+                        if (cash + curr_sell.earn < eva.cost) continue;
+
+                        // 将动作添加进列表中，此处假定是拆完了再放EVA
+                        ops.push_back(eva);
                         Defense_operation& curr = ops.back();
                         curr.suspend(curr_sell.round_needed);
                         curr.concat_sell(curr_sell);
@@ -409,6 +447,10 @@ class Op_generator {
         }
         Op_generator& operator<<(const LS_cfg& new_ls) {
             ls_cfg = new_ls;
+            return *this;
+        }
+        Op_generator& operator<<(const EVA_cfg& new_eva) {
+            eva_cfg = new_eva;
             return *this;
         }
 
@@ -533,6 +575,18 @@ class Op_generator {
                 temp_build.loss -= UPGRADE_COST[2] / BUILD_LOSS_DIV;
             }
 
+        }
+
+        /**
+         * @brief 获取在给定点释放EVA后，添加护盾的蚂蚁编号
+         * @param pos 释放EVA的坐标
+         * @param player_id 【释放EVA】的玩家编号
+         * @return std::vector<int> 添加护盾的蚂蚁编号列表
+         */
+        std::vector<int> EVA_ant(const Pos& pos, int player_id) const {
+            std::vector<int> ans;
+            for (const Ant& a : info.ants) if (a.player == player_id && distance(a.x, a.y, pos.x, pos.y) <= EVA_RANGE) ans.push_back(a.id);
+            return ans;
         }
 
         static constexpr Pos LIGHTNING_POS[2] {{3, 9}, {15, 9}};
