@@ -127,7 +127,7 @@ struct EVA_cfg {
 };
 // EMP配置类
 struct EMP_cfg {
-    bool available; // 是否允许使用EVA
+    bool available; // 是否允许使用EMP
 };
 
 // “卖出动作序列”

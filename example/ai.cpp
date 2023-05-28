@@ -545,6 +545,11 @@ class AI_ {
                 EVA_gen << Sell_cfg{3, 3} << Build_cfg{false} << Upgrade_cfg{0} << EVA_cfg{true};
                 EVA_gen.generate_operations();
 
+                // “模拟对方防守”的结果与我方如何sell塔无关，所以可以解耦出来
+                Pos last_EVA_pos = {-1, -1};
+                bool defended = false;
+                bool old_defended = false;
+
                 for (const Defense_operation& EVA_list : EVA_gen.ops) {
                     if (Simulator::round_count - atk_start_time > 160000) {// 硬卡时间
                         logger.err("[w] EVA search time out");
@@ -567,30 +572,36 @@ class AI_ {
                     int min_avail = min_avail_money_under_EMP(game_info, EVA_list) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
                     if (!(EVA_economy_crit || min_avail >= 160)) continue;
 
-                    // 模拟对方防守
-                    Simulator raw_sim(game_info, pid, pid);
-                    raw_sim.step_simulation(EVA_list.round_needed);
-                    raw_sim.task_list[pid].emplace_back(EVA_list.ops.back()); // 对对方而言，我方是否Sell塔并不是很重要
-                    raw_sim.info.coins[pid] = 999; // 所以作点弊也没关系...
-                    raw_sim.step_to_next_player();
+                    // 假如该位置的EVA还没模拟过，则模拟对方防守
+                    Pos curr_EVA_pos = {EVA_list.ops.back().op.arg0, EVA_list.ops.back().op.arg1};
+                    if (last_EVA_pos != curr_EVA_pos) {
+                        last_EVA_pos = curr_EVA_pos;
 
-                    Op_generator generator(raw_sim.info, !pid);
-                    generator.generate_operations();
+                        Simulator raw_sim(game_info, pid, pid);
+                        raw_sim.step_simulation(EVA_list.round_needed);
+                        raw_sim.task_list[pid].emplace_back(EVA_list.ops.back()); // 对对方而言，我方是否Sell塔并不是很重要
+                        raw_sim.info.coins[pid] = 999; // 所以作点弊也没关系...
+                        raw_sim.step_to_next_player();
 
-                    bool defended = false;
-                    bool old_defended = false;
-                    for (const Defense_operation& op_list : generator.ops) {
-                        Simulator atk_sim(raw_sim.info, !pid, pid);
-                        atk_sim.task_list[!pid] = op_list.ops;
-                        Sim_result res = atk_sim.simulate(EVA_SIM_ROUND, EVA_SIM_ROUND);
+                        Op_generator generator(raw_sim.info, !pid);
+                        generator.generate_operations();
 
-                        if (res.old_opp < opl.res.old_opp) old_defended = true;
-                        if (res.first_succ > EVA_SIM_ROUND || res.succ_ant < EVA_raw.res.dmg_dealt) {
-                            defended = true;
-                            // logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
-                            break;
+                        defended = false;
+                        old_defended = false;
+                        for (const Defense_operation& op_list : generator.ops) {
+                            Simulator atk_sim(raw_sim.info, !pid, pid);
+                            atk_sim.task_list[!pid] = op_list.ops;
+                            Sim_result res = atk_sim.simulate(EVA_SIM_ROUND, EVA_SIM_ROUND);
+
+                            if (res.old_opp < opl.res.old_opp) old_defended = true;
+                            if (res.first_succ > EVA_SIM_ROUND || res.succ_ant < EVA_raw.res.dmg_dealt) {
+                                defended = true;
+                                // logger.err("%s solved by %s", opl.attack_str().c_str(), op_list.str().c_str());
+                                break;
+                            }
                         }
                     }
+
                     // 如果（对方）未找到解，则更新答案
                     if (!defended) {
                         logger.err("Not solved EVA %s", opl.attack_str().c_str());
@@ -635,10 +646,16 @@ class AI_ {
             bool reflect_tag = reflecting_EMP_countdown >= 0;
             bool op_ls_ready = game_info.super_weapon_cd[!pid][SuperWeaponType::LightningStorm] <= 0;
             bool EMP_economy_crit = !op_ls_ready || reflect_tag || (avail_money >= 200);
-            if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_money >= 150) if (raw_f_succ >= 40 || reflect_tag) {
+            if (game_info.super_weapon_cd[pid][EB] <= 0 && last_atk > 5 && avail_value[pid] >= 210) if (raw_f_succ >= 40 || reflect_tag) {
                 Op_generator EMP_gen(game_info, pid, avail_money);
                 EMP_gen << Sell_cfg{2, 3} << Build_cfg{false} << Upgrade_cfg{0} << EMP_cfg{true};
                 EMP_gen.generate_operations();
+
+                // “模拟对方防守”的结果与我方如何sell塔无关，所以可以解耦出来
+                Pos last_EMP_pos = {-1, -1};
+                bool ls_defended = false;
+                bool build_defended = false;
+                bool old_defended = false;
 
                 for (const Defense_operation& EMP_list : EMP_gen.ops) {
                     if (Simulator::round_count - atk_start_time > 170000) {// 硬卡时间
@@ -649,7 +666,7 @@ class AI_ {
 
                     Operation_list opl({}, -1, EMP_list.loss, EMP_list.cost);
                     opl.ops = EMP_list.ops;
-                    opl.evaluate(25); // 用于判定拆完塔之后是不是安全的
+                    opl.evaluate(20); // 用于判定拆完塔之后是不是安全的
 
                     // 进攻效果判据
                     bool dmg_cond = opl.res.dmg_dealt > EMP_raw.res.dmg_dealt && opl.res.dmg_dealt > 2;
@@ -661,8 +678,13 @@ class AI_ {
 
                     // 部分经济要求判据
                     int min_avail = min_avail_money_under_EMP(game_info, {opl.ops}) * (game_info.super_weapon_cd[pid][SuperWeaponType::LightningStorm] <= 0);
-                    if (EMP_economy_crit || min_avail >= 160) {
-                        // 模拟对方防守
+                    if (!(EMP_economy_crit || min_avail >= 160)) continue;
+
+                    // 假如该位置的EMP还没模拟过，则模拟对方防守
+                    Pos curr_EMP_pos = {EMP_list.ops.back().op.arg0, EMP_list.ops.back().op.arg1};
+                    if (last_EMP_pos != curr_EMP_pos) {
+                        last_EMP_pos = curr_EMP_pos;
+
                         Simulator raw_sim(game_info, pid, pid);
                         raw_sim.step_simulation(EMP_list.round_needed);
                         raw_sim.task_list[pid].emplace_back(EMP_list.ops.back()); // 对对方而言，我方是否Sell塔并不是很重要
@@ -673,9 +695,9 @@ class AI_ {
                         generator << LS_cfg{true};
                         generator.generate_operations();
 
-                        bool ls_defended = false;
-                        bool build_defended = false;
-                        bool old_defended = false;
+                        ls_defended = false;
+                        build_defended = false;
+                        old_defended = false;
                         for (const Defense_operation& op_list : generator.ops) {
                             if (ls_defended && op_list.has_ls()) continue;
 
@@ -691,21 +713,21 @@ class AI_ {
                                 if (build_defended) break;
                             }
                         }
+                    }
 
-                        if (reflect_tag && opl.attack_better_than(best_EMP, consider_old)) {
-                            logger.err("Possible reflect EMP %s", opl.attack_str().c_str());
-                            best_EMP = opl;
-                        } else if (ls_defended && !build_defended) { // （对方）只找到LS解
-                            logger.err("%s solved by LS", opl.attack_str().c_str());
-                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
-                        } else if (!ls_defended && !build_defended) { // （对方）未找到解
-                            logger.err("Not solved EMP %s", opl.attack_str().c_str());
-                            opl.res.dmg_dealt += 100; // 标记为“不可解”
-                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
-                        } else if (consider_old && old_cond && !old_defended) { // 未找到“防止老死”的解
-                            logger.err("EMP Attack for old %s", opl.attack_str().c_str());
-                            if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
-                        }
+                    if (reflect_tag && opl.attack_better_than(best_EMP, consider_old)) {
+                        logger.err("Possible reflect EMP %s", opl.attack_str().c_str());
+                        best_EMP = opl;
+                    } else if (ls_defended && !build_defended) { // （对方）只找到LS解
+                        logger.err("%s solved by LS", opl.attack_str().c_str());
+                        if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
+                    } else if (!ls_defended && !build_defended) { // （对方）未找到解
+                        logger.err("Not solved EMP %s", opl.attack_str().c_str());
+                        opl.res.dmg_dealt += 100; // 标记为“不可解”
+                        if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
+                    } else if (consider_old && old_cond && !old_defended) { // 未找到“防止老死”的解
+                        logger.err("EMP Attack for old %s", opl.attack_str().c_str());
+                        if (opl.attack_better_than(best_EMP, consider_old)) best_EMP = opl;
                     }
                 }
                 logger.err("raw best_EMP: " + best_EMP.attack_str());
@@ -713,6 +735,7 @@ class AI_ {
                 bool unsolved_trigger = (best_EMP.res.dmg_dealt > 100);
                 bool force_ls_trigger = (avail_value[pid] - avail_value[!pid] >= 150);
                 force_ls_trigger |= (avail_money >= 250 && avail_value[pid] >= 300);
+                force_ls_trigger |= game_info.round > 450;
                 if (best_EMP.res.dmg_dealt > EMP_raw.res.dmg_dealt && (unsolved_trigger || force_ls_trigger || reflect_tag)) {
                     // 不可解，或己方经济有优势时挤压对方
                     std::string pr;
@@ -746,6 +769,7 @@ class AI_ {
 
 
             // 随缘升基地
+            // 事实证明，打开这个功能则打eve/MoebiusMeow战绩很好，关闭这个功能则打omegafantasy战绩很好
             int base_level = game_info.bases[pid].ant_level;
             bool draw_cond = (game_info.bases[pid].hp <= game_info.bases[!pid].hp) && (ants_killed[pid] <= ants_killed[!pid]);
             bool money_cond = (avail_money >= 200 + 50 * base_level) && (avail_value[pid] >= 300 + 50 * base_level) && (base_level < 2);

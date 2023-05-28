@@ -193,6 +193,9 @@ struct Pos {
     bool operator==(const Pos& other) const {
         return x == other.x && y == other.y;
     }
+    bool operator!=(const Pos& other) const {
+        return x != other.x || y != other.y;
+    }
 
     int dist_to(int x1, int x2) const {
         return distance(x, y, x1, x2);
